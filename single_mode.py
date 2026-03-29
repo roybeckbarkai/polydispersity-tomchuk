@@ -152,8 +152,9 @@ def run():
 
         fig_1d.add_trace(go.Scatter(x=plot_x, y=plot_y, mode='markers', name=label_str, marker=dict(color=color_str, size=4)))
 
-        if 'I_fit' in analysis_res:
-            fit_y = analysis_res['I_fit']
+        fit_arr = np.asarray(analysis_res.get('I_fit', []), dtype=float)
+        if fit_arr.ndim == 1 and len(fit_arr) == len(q_target):
+            fit_y = fit_arr
             fit_x = q_target
             if plot_type == "Guinier": fit_x = q_target**2; fit_y = np.log(np.maximum(fit_y, 1e-9))
             elif plot_type == "Porod": fit_y = fit_y * (q_target**4)
