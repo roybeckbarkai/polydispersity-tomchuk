@@ -9,7 +9,7 @@ from scipy.integrate import trapezoid
 from scipy.ndimage import gaussian_filter
 from scipy.special import erf, gammaln
 import pandas as pd
-from sim_utils import nCr, double_factorial, sphere_form_factor, debye_form_factor, get_distribution
+from sim_utils import nCr, double_factorial, sphere_form_factor, debye_form_factor, get_distribution, run_simulation_core
 
 TOMCHUK_C1 = 0.771965
 TOMCHUK_C2 = 0.319739
@@ -490,3 +490,211 @@ def create_distribution_csv(header, r, input_dist, recovered_dists, params):
              df['NNLS_Recovered_PDF'] = np.interp(r, recovered_dists['nnls_r'], recovered_dists['nnls_pdf'], left=0, right=0)
              
     return header + df.to_csv(index=False)
+
+def get_true_size(params):
+    if params['mode'] == 'Sphere':
+        return float(params['mean_rg']) * np.sqrt(5.0 / 3.0)
+    return float(params['mean_rg'])
+
+def get_recovered_size(analysis_res, params, variant='primary'):
+    if params['mode'] == 'IDP':
+        return analysis_res.get('rg_num_rec', 0) if params['method'] == 'NNLS' else analysis_res.get('Rg', 0)
+
+    if params['method'] == 'NNLS':
+        return analysis_res.get('mean_r_rec', 0)
+    if variant == 'pdi2':
+        return analysis_res.get('mean_r_rec_pdi2', 0)
+    return analysis_res.get('mean_r_rec_pdi', 0)
+
+def build_recovered_distributions(params, analysis_res, r_vals):
+    recovered_dists = {}
+    if params['method'] == 'Tomchuk':
+        mean_r_pdi = analysis_res.get('mean_r_rec_pdi', 0)
+        if mean_r_pdi > 0:
+            recovered_dists['pdi'] = get_distribution(params['dist_type'], r_vals, mean_r_pdi, analysis_res.get('p_rec_pdi', 0))
+
+        mean_r_pdi2 = analysis_res.get('mean_r_rec_pdi2', 0)
+        if mean_r_pdi2 > 0:
+            recovered_dists['pdi2'] = get_distribution(params['dist_type'], r_vals, mean_r_pdi2, analysis_res.get('p_rec_pdi2', 0))
+    elif 'nnls_r' in analysis_res:
+        recovered_dists['nnls_r'] = analysis_res['nnls_r']
+        recovered_dists['nnls_pdf'] = analysis_res.get('nnls_pdf', analysis_res.get('nnls_w', []))
+    return recovered_dists
+
+def build_summary_row(params, analysis_res, base_row=None):
+    summary_row = {} if base_row is None else base_row.copy()
+    p_true = float(params['p_val'])
+    true_size = get_true_size(params)
+
+    rec_p = analysis_res.get('p_rec', 0) if params['method'] == 'NNLS' else analysis_res.get('p_rec_pdi', 0)
+    rec_size = get_recovered_size(analysis_res, params, variant='primary')
+
+    summary_row.update({
+        'Recovered_p': rec_p,
+        'Recovered_Size': rec_size,
+        'Rel_Err_p': (rec_p - p_true) / p_true if p_true != 0 else 0,
+        'Rel_Err_Size': (rec_size - true_size) / true_size if true_size != 0 else 0,
+        'Chi2': analysis_res.get('chi2', 0)
+    })
+
+    if params['method'] == 'Tomchuk':
+        rec_p_2 = analysis_res.get('p_rec_pdi2', 0)
+        rec_size_2 = get_recovered_size(analysis_res, params, variant='pdi2')
+        summary_row.update({
+            'Recovered_p_PDI2': rec_p_2,
+            'Recovered_Size_PDI2': rec_size_2,
+            'Rel_Err_p_PDI2': (rec_p_2 - p_true) / p_true if p_true != 0 else 0,
+            'Rel_Err_Size_PDI2': (rec_size_2 - true_size) / true_size if true_size != 0 else 0,
+        })
+
+    return summary_row
+
+def normalize_pdf(r_vals, pdf_vals):
+    r_vals = np.asarray(r_vals, dtype=float)
+    pdf_vals = np.asarray(pdf_vals, dtype=float)
+    if len(r_vals) == 0 or len(pdf_vals) == 0:
+        return pdf_vals
+    area = trapezoid(pdf_vals, r_vals)
+    if area > 0:
+        return pdf_vals / area
+    return pdf_vals
+
+def calculate_sphere_theoretical_parameters(q_vals, i_vals, r_vals, pdf_vals):
+    q_vals = np.asarray(q_vals, dtype=float)
+    i_vals = np.asarray(i_vals, dtype=float)
+    r_vals = np.asarray(r_vals, dtype=float)
+    pdf_norm = normalize_pdf(r_vals, pdf_vals)
+
+    moments = {}
+    for order in (2, 3, 4, 6, 8):
+        moments[order] = trapezoid((r_vals ** order) * pdf_norm, r_vals)
+
+    i_matrix = sphere_form_factor(q_vals, r_vals)
+    i_shape = trapezoid(i_matrix * pdf_norm, r_vals, axis=1)
+    num = np.sum(i_vals * i_shape)
+    den = np.sum(i_shape ** 2)
+    scale = num / den if den > 0 else 1.0
+
+    mean_radius = moments[1] = trapezoid(r_vals * pdf_norm, r_vals)
+    mean_square = trapezoid((r_vals ** 2) * pdf_norm, r_vals)
+    std_radius = np.sqrt(max(mean_square - mean_radius ** 2, 0))
+    p_true = std_radius / mean_radius if mean_radius > 0 else 0
+
+    rg_true = np.sqrt((3.0 * moments[8]) / (5.0 * moments[6])) if moments[6] > 0 else 0
+    g_true = scale * ((4.0 * np.pi / 3.0) ** 2) * moments[6]
+    b_true = scale * 8.0 * (np.pi ** 2) * moments[2]
+    q_true = scale * (8.0 * (np.pi ** 3) / 3.0) * moments[3]
+    lc_true = 1.5 * moments[4] / moments[3] if moments[3] > 0 else 0
+    pdi_true = (moments[2] * (moments[8] ** 2)) / (moments[6] ** 3) if moments[6] > 0 else 0
+    pdi2_true = (moments[2] * moments[4]) / (moments[3] ** 2) if moments[3] > 0 else 0
+
+    return {
+        'scale': scale,
+        'mean_radius': mean_radius,
+        'p_true': p_true,
+        'Rg': rg_true,
+        'G': g_true,
+        'B': b_true,
+        'Q': q_true,
+        'lc': lc_true,
+        'PDI': pdi_true,
+        'PDI2': pdi2_true,
+        'I_shape': i_shape * scale,
+    }
+
+def evaluate_tomchuk_sanity_checks(q_vals, i_vals, r_vals, pdf_vals, analysis_res, rel_tol=0.2):
+    expected = calculate_sphere_theoretical_parameters(q_vals, i_vals, r_vals, pdf_vals)
+    observed = {
+        'Rg': analysis_res.get('Rg', 0),
+        'G': analysis_res.get('G', 0),
+        'B': analysis_res.get('B', 0),
+        'Q': analysis_res.get('Q', 0),
+        'lc': analysis_res.get('lc', 0),
+        'PDI': analysis_res.get('PDI', 0),
+        'PDI2': analysis_res.get('PDI2', 0),
+        'mean_radius_pdi': analysis_res.get('mean_r_rec_pdi', 0),
+        'mean_radius_pdi2': analysis_res.get('mean_r_rec_pdi2', 0),
+        'p_rec_pdi': analysis_res.get('p_rec_pdi', 0),
+        'p_rec_pdi2': analysis_res.get('p_rec_pdi2', 0),
+    }
+
+    comparisons = {
+        'Rg': ('Rg', 'Rg'),
+        'G': ('G', 'G'),
+        'B': ('B', 'B'),
+        'Q': ('Q', 'Q'),
+        'lc': ('lc', 'lc'),
+        'PDI': ('PDI', 'PDI'),
+        'PDI2': ('PDI2', 'PDI2'),
+        'mean_radius_pdi': ('mean_radius_pdi', 'mean_radius'),
+        'mean_radius_pdi2': ('mean_radius_pdi2', 'mean_radius'),
+        'p_rec_pdi': ('p_rec_pdi', 'p_true'),
+        'p_rec_pdi2': ('p_rec_pdi2', 'p_true'),
+    }
+
+    metrics = {}
+    failures = []
+    for label, (obs_key, exp_key) in comparisons.items():
+        obs = observed[obs_key]
+        exp = expected[exp_key]
+        if exp != 0:
+            rel_err = (obs - exp) / exp
+        else:
+            rel_err = 0 if obs == 0 else np.inf
+        metrics[label] = {
+            'observed': obs,
+            'expected': exp,
+            'rel_err': rel_err,
+            'pass': np.isfinite(rel_err) and abs(rel_err) <= rel_tol,
+        }
+        if not metrics[label]['pass']:
+            failures.append(label)
+
+    suggestions = []
+    if any(key in failures for key in ('Rg', 'G')):
+        suggestions.append("Low-q extraction looks unstable: inspect the Guinier window and the low-q sampling range.")
+    if 'B' in failures:
+        suggestions.append("High-q Porod extraction looks unstable: inspect the high-q tail, q-range, and B estimation strategy.")
+    if any(key in failures for key in ('Q', 'lc', 'PDI2', 'p_rec_pdi2')):
+        suggestions.append("Invariant-based extraction is drifting: inspect Q/lc integration limits, tail corrections, and PDI2 handling.")
+    if any(key in failures for key in ('PDI', 'p_rec_pdi')):
+        suggestions.append("PDI-based recovery is drifting: inspect the consistency of G, Rg, and B extraction against the simulated curve.")
+    if any(key in failures for key in ('mean_radius_pdi', 'mean_radius_pdi2')):
+        suggestions.append("Recovered mean size is drifting: inspect moment-to-size conversion and the chosen distribution family.")
+    if not suggestions:
+        suggestions.append("All current sanity checks passed within tolerance.")
+
+    return {
+        'expected': expected,
+        'observed': observed,
+        'metrics': metrics,
+        'failures': failures,
+        'suggestions': suggestions,
+        'rel_tol': rel_tol,
+    }
+
+def build_sanity_summary_row(q_vals, i_vals, r_vals, pdf_vals, analysis_res, rel_tol=0.2, base_row=None):
+    sanity = evaluate_tomchuk_sanity_checks(q_vals, i_vals, r_vals, pdf_vals, analysis_res, rel_tol=rel_tol)
+    summary_row = {} if base_row is None else base_row.copy()
+    summary_row.update({
+        'Sanity_Pass': len(sanity['failures']) == 0,
+        'Sanity_Failures': ",".join(sanity['failures']) if sanity['failures'] else "none",
+        'Sanity_Suggestions': " | ".join(sanity['suggestions']),
+    })
+    for key, value in sanity['metrics'].items():
+        summary_row[f'Sanity_RelErr_{key}'] = value['rel_err']
+    return summary_row
+
+def run_simulation_analysis_case(params):
+    q_sim, i_sim, _, r_vals, pdf_vals = run_simulation_core(params)
+    analysis_res = perform_saxs_analysis(
+        q_sim,
+        i_sim,
+        params['dist_type'],
+        params['mean_rg'],
+        params['mode'],
+        params['method'],
+        params['nnls_max_rg']
+    )
+    recovered_dists = build_recovered_distributions(params, analysis_res, r_vals)
+    return q_sim, i_sim, r_vals, pdf_vals, analysis_res, recovered_dists

@@ -4,8 +4,11 @@ import sys
 import numpy as np
 import pandas as pd
 
-from analysis_utils import perform_saxs_analysis
-from sim_utils import run_simulation_core
+from analysis_utils import (
+    run_simulation_analysis_case,
+    build_summary_row,
+    build_sanity_summary_row,
+)
 
 
 DEFAULT_DISTRIBUTIONS = ["Gaussian"]
@@ -29,27 +32,30 @@ def run_case(dist_type, p_val, mean_rg, q_max, n_bins, flux, noise, pixels, smea
         "flux": flux,
         "noise": noise,
         "binning_mode": "Logarithmic",
+        "method": "Tomchuk",
+        "nnls_max_rg": mean_rg * (1 + 8 * p_val),
     }
 
-    q_sim, i_sim, _, _, _ = run_simulation_core(params)
-    res = perform_saxs_analysis(q_sim, i_sim, dist_type, mean_rg, "Sphere", "Tomchuk", mean_rg * (1 + 8 * p_val))
-
-    p_pdi = res.get("p_rec_pdi", 0.0)
-    p_pdi2 = res.get("p_rec_pdi2", 0.0)
+    q_sim, i_sim, r_vals, pdf_vals, res, _ = run_simulation_analysis_case(params)
+    summary = build_summary_row(params, res)
+    sanity_summary = build_sanity_summary_row(q_sim, i_sim, r_vals, pdf_vals, res)
     return {
         "distribution": dist_type,
         "p_input": p_val,
-        "p_pdi": p_pdi,
-        "p_pdi2": p_pdi2,
-        "rel_err_pdi": (p_pdi - p_val) / p_val if p_val else 0.0,
-        "rel_err_pdi2": (p_pdi2 - p_val) / p_val if p_val else 0.0,
+        "p_pdi": res.get("p_rec_pdi", 0.0),
+        "p_pdi2": res.get("p_rec_pdi2", 0.0),
+        "rel_err_pdi": summary.get("Rel_Err_p", 0.0),
+        "rel_err_pdi2": summary.get("Rel_Err_p_PDI2", 0.0),
         "mean_radius_pdi": res.get("mean_r_rec_pdi", 0.0),
         "mean_radius_pdi2": res.get("mean_r_rec_pdi2", 0.0),
         "PDI": res.get("PDI", 0.0),
         "PDI2": res.get("PDI2", 0.0),
         "chi2_pdi": res.get("chi2_pdi", 0.0),
         "chi2_pdi2": res.get("chi2_pdi2", 0.0),
-    }
+        "sanity_failures": sanity_summary["Sanity_Failures"],
+        "sanity_pass": sanity_summary["Sanity_Pass"],
+        "sanity_suggestions": sanity_summary["Sanity_Suggestions"],
+    } | {k: v for k, v in sanity_summary.items() if k.startswith("Sanity_RelErr_")}
 
 
 def parse_args():
@@ -97,6 +103,14 @@ def main():
     max_err_pdi2 = float(df["rel_err_pdi2"].abs().max())
     print(f"\nmax |relative error| PDI : {max_err_pdi:.4f}")
     print(f"max |relative error| PDI2: {max_err_pdi2:.4f}")
+
+    failing_sanity = df.loc[~df["sanity_pass"]]
+    if len(failing_sanity) > 0:
+        print("\nSanity-check warnings:")
+        for _, row in failing_sanity.iterrows():
+            print(
+                f"- {row['distribution']} p={row['p_input']:.4f}: failed [{row['sanity_failures']}] -> {row['sanity_suggestions']}"
+            )
 
     if max(max_err_pdi, max_err_pdi2) > args.max_rel_error:
         print(

@@ -11,8 +11,14 @@ import itertools
 import numpy as np
 import plotly.express as px
 from datetime import datetime
-from sim_utils import run_simulation_core, get_distribution
-from analysis_utils import perform_saxs_analysis, get_header_string, create_intensity_csv, create_distribution_csv
+from analysis_utils import (
+    run_simulation_analysis_case,
+    build_summary_row,
+    build_sanity_summary_row,
+    get_header_string,
+    create_intensity_csv,
+    create_distribution_csv,
+)
 
 # Mappings for Short Codes -> Full Parameter Names
 MODE_MAP = {'S': 'Sphere', 'P': 'IDP'}
@@ -71,9 +77,7 @@ def run():
     curr_mode = st.session_state.get('mode_key', 'Sphere')
     curr_dist = st.session_state.get('dist_type', 'Gaussian')
     
-    curr_method = "NNLS"
-    if curr_mode == 'Sphere':
-         curr_method = "NNLS" 
+    curr_method = st.session_state.get('analysis_method', 'NNLS')
 
     default_row = {
         "mode (S/P)": str(REV_MODE_MAP.get(curr_mode, 'S')),
@@ -108,7 +112,7 @@ def run():
                            pd.DataFrame([default_row]).to_csv(index=False), 
                            "batch_template.csv", "text/csv")
         
-    st.info("Tip: Enter lists like `[0.1, 0.3]` in parameter cells to run combinations. Use codes: S=Sphere, P=Polymer | G=Gaussian... | T=Tomchuk, N=NNLS")
+    st.info("Tip: Enter lists like `[0.1, 0.3]` in parameter cells to run combinations. Use codes: S=Sphere, P=Polymer | G=Gaussian... | T=Tomchuk, N=NNLS. IDP rows are always analyzed with NNLS to match single mode.")
     
     df_to_edit = st.session_state.batch_df.astype(str)
     # Using 'width'='stretch' logic for data editor if version supports, otherwise just default
@@ -130,8 +134,13 @@ def run():
                 row_dict = row.to_dict()
                 
                 try:
+                    mode = MODE_MAP.get(row_dict.get('mode (S/P)', 'S'), 'Sphere')
+                    method = METHOD_MAP.get(row_dict.get('method (T/N)', 'N'), 'NNLS')
+                    if mode == 'IDP':
+                        method = 'NNLS'
+
                     params = {
-                        'mode': MODE_MAP.get(row_dict.get('mode (S/P)', 'S'), 'Sphere'),
+                        'mode': mode,
                         'dist_type': DIST_MAP.get(row_dict.get('dist (G/L/S/B/T/U)', 'G'), 'Gaussian'),
                         'mean_rg': float(row_dict['mean_rg']),
                         'p_val': float(row_dict['p_val']),
@@ -143,31 +152,11 @@ def run():
                         'smearing': float(row_dict['smearing']),
                         'flux': float(row_dict['flux']),
                         'noise': str(row_dict['noise']).lower() in ['true', '1', 't', 'yes'],
-                        'method': METHOD_MAP.get(row_dict.get('method (T/N)', 'N'), 'NNLS'),
+                        'method': method,
                         'nnls_max_rg': float(row_dict['nnls_max_rg'])
                     }
 
-                    q_sim, i_sim, _, r_vals, pdf_vals = run_simulation_core(params)
-                    
-                    res = perform_saxs_analysis(q_sim, i_sim, 
-                                                params['dist_type'], 
-                                                params['mean_rg'], 
-                                                params['mode'], 
-                                                params['method'], 
-                                                params['nnls_max_rg'])
-                    
-                    rec_dists = {}
-                    if params['method'] == 'Tomchuk':
-                         mean_r_pdi = res.get('mean_r_rec_pdi', params['mean_rg'] * np.sqrt(5.0 / 3.0))
-                         if mean_r_pdi > 0:
-                             rec_dists['pdi'] = get_distribution(params['dist_type'], r_vals, mean_r_pdi, res.get('p_rec_pdi', 0))
-                         
-                         mean_r_pdi2 = res.get('mean_r_rec_pdi2', params['mean_rg'] * np.sqrt(5.0 / 3.0))
-                         if mean_r_pdi2 > 0:
-                             rec_dists['pdi2'] = get_distribution(params['dist_type'], r_vals, mean_r_pdi2, res.get('p_rec_pdi2', 0))
-                    elif 'nnls_r' in res:
-                         rec_dists['nnls_r'] = res['nnls_r']
-                         rec_dists['nnls_pdf'] = res.get('nnls_pdf', res['nnls_w'])
+                    q_sim, i_sim, r_vals, pdf_vals, res, rec_dists = run_simulation_analysis_case(params)
 
                     header = get_header_string(params, res)
                     intensity_csv = create_intensity_csv(header, q_sim, i_sim, res, params['method'])
@@ -176,42 +165,9 @@ def run():
                     zf.writestr(f"run_{i}_intensity.csv", intensity_csv)
                     zf.writestr(f"run_{i}_distribution.csv", dist_csv)
                     
-                    summary_row = row_dict.copy()
-                    
-                    rec_p = res.get('p_rec', 0) if params['method'] == 'NNLS' else res.get('p_rec_pdi', 0)
+                    summary_row = build_summary_row(params, res, base_row=row_dict)
                     if params['mode'] == 'Sphere':
-                        true_size = params['mean_rg'] * np.sqrt(5.0 / 3.0)
-                        rec_size = res.get('mean_r_rec', 0) if params['method'] == 'NNLS' else res.get('mean_r_rec_pdi', 0)
-                    else:
-                        true_size = params['mean_rg']
-                        rec_size = res.get('rg_num_rec', 0) if params['method'] == 'NNLS' else res.get('Rg', 0)
-                    
-                    rec_p_2 = res.get('p_rec_pdi2', 0) if params['method'] == 'Tomchuk' else 0
-                    rec_size_2 = res.get('mean_r_rec_pdi2', 0) if params['method'] == 'Tomchuk' and params['mode'] == 'Sphere' else 0
-
-                    p_true = params['p_val']
-                    
-                    err_p = (rec_p - p_true)/p_true if p_true != 0 else 0
-                    err_size = (rec_size - true_size)/true_size if true_size != 0 else 0
-
-                    summary_row.update({
-                        'Recovered_p': rec_p,
-                        'Recovered_Size': rec_size,
-                        'Rel_Err_p': err_p,
-                        'Rel_Err_Size': err_size,
-                        'Chi2': res.get('chi2', 0)
-                    })
-                    
-                    if params['method'] == 'Tomchuk':
-                        err_p2 = (rec_p_2 - p_true)/p_true if p_true != 0 else 0
-                        err_size2 = (rec_size_2 - true_size)/true_size if true_size != 0 else 0
-                        summary_row.update({
-                             'Recovered_p_PDI2': rec_p_2,
-                             'Recovered_Size_PDI2': rec_size_2,
-                             'Rel_Err_p_PDI2': err_p2,
-                             'Rel_Err_Size_PDI2': err_size2,
-                        })
-
+                        summary_row = build_sanity_summary_row(q_sim, i_sim, r_vals, pdf_vals, res, base_row=summary_row)
                     summary_results.append(summary_row)
 
                 except Exception as e:

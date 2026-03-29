@@ -23,6 +23,7 @@ def run():
     if mode_key == 'Sphere':
         analysis_method = st.sidebar.selectbox("Analysis Method", ["Tomchuk (Invariants)", "NNLS (Distribution Fit)"])
         analysis_method = "Tomchuk" if "Tomchuk" in analysis_method else "NNLS"
+    st.session_state['analysis_method'] = analysis_method
 
     st.sidebar.header("Experimental Data")
     uploaded_file = st.sidebar.file_uploader("Load 1D Profile", type=['dat', 'out', 'txt', 'csv'])
