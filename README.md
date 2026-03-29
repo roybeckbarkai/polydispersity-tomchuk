@@ -14,6 +14,54 @@ The app supports two analysis paths for spheres:
 For IDP mode, the app uses `NNLS` only.
 
 
+Tomchuk Extraction Path In This Code
+------------------------------------
+
+The Tomchuk branch now uses a shared, explicit extraction path in `analysis_utils.py`:
+
+1. estimate `Rg` and `G` from a Guinier window
+2. fit the unified Beaucage / Tomchuk-style intensity model
+3. if that fit is valid, use fitted `G`, `Rg`, and `B`
+4. compute `Q` and `lc` analytically from the fitted model
+5. recover `p` from `PDI` and `PDI2`
+
+The older hybrid path is still kept internally for diagnostics:
+
+- `Rg` and `G` from Guinier
+- `B` from the measured high-q tail
+- `Q` and `lc` from finite-q integration plus tail correction
+
+For Tomchuk analysis, the app now prefers the unified-fit path when it is available, and records the choice as:
+
+- `tomchuk_extraction = unified_fit`
+- or `tomchuk_extraction = hybrid`
+
+This makes it easier to inspect whether failures come from the fitted model itself or from the older mixed extraction route.
+
+
+New UI Diagnostics
+------------------
+
+Single mode now exposes three extra Tomchuk diagnostics:
+
+- `Tomchuk Path`: shows whether the current analysis used `unified_fit` or `hybrid`
+- `Reconstructed Fit`: shows `chi2` for the SAXS curves reconstructed from the recovered `p` values from `PDI` and `PDI2`
+- `Recommended q / bins`: an on-demand sweep that searches for a practical `q_max` / `1D bins` region for the current settings
+
+The reconstructed-fit block is intended to answer a simple question:
+
+- if I take the extracted scattering `Rg`, combine it with the recovered `p`, reconstruct the corresponding distribution, and calculate the SAXS curve again, does that curve still agree with the measured or simulated data?
+
+The quality labels are:
+
+- `strong`: reduced `chi2 <= 2`
+- `usable`: reduced `chi2 <= 5`
+- `weak`: reduced `chi2 <= 10`
+- `poor`: reduced `chi2 > 10`
+
+These labels are intentionally conservative.
+
+
 What Is In The Repository
 -------------------------
 
@@ -109,6 +157,8 @@ The validator uses the same shared helper path used by batch mode:
 - `run_simulation_analysis_case(...)`
 - `build_summary_row(...)`
 
+It can also run an automatic recommendation sweep for `q_max` and `1D bins`.
+
 Run the default Tomchuk benchmark:
 
 ```bash
@@ -129,11 +179,36 @@ Run a broader, exploratory sweep across several distributions:
 python validate_tomchuk.py --distributions Gaussian Lognormal Schulz Boltzmann Triangular Uniform --p-values 0.7 --max-rel-error 1.0
 ```
 
+Run the higher-resolution benchmark discussed below:
+
+```bash
+python validate_tomchuk.py --distributions Gaussian --p-values 0.7 --mean-rg 4.0 --q-max 4.0 --n-bins 1024 --pixels 1024 --smearing 2.0 --flux 1e12 --max-rel-error 0.2
+```
+
+Run the higher-resolution multi-distribution sweep:
+
+```bash
+python validate_tomchuk.py --distributions Gaussian Lognormal Schulz Boltzmann Triangular Uniform --p-values 0.7 --mean-rg 4.0 --q-max 4.0 --n-bins 1024 --pixels 1024 --smearing 2.0 --flux 1e12 --max-rel-error 2.0
+```
+
+Run the recommendation evaluator:
+
+```bash
+python validate_tomchuk.py --distributions Gaussian --p-values 0.3 --mean-rg 2.0 --q-max 2.5 --n-bins 256 --pixels 1024 --smearing 1.0 --flux 1e12 --recommend-settings --target-abs-error 0.01 --max-rel-error 1.0
+```
+
 
 Current Test Results
 --------------------
 
 The following results were obtained from the current code in this repository.
+
+Important note:
+
+- `p_input` in the validator is the sidebar / command-line input width
+- the deeper sanity check compares extracted quantities against the actual simulated distribution moments
+- those two are not always numerically identical because the simulated distribution is represented on a finite radius grid and some families are truncated at small radius
+- for that reason, the sanity layer is the better test of whether `G`, `Rg`, `B`, `Q`, `lc`, `PDI`, and `PDI2` were extracted consistently from the simulated curve
 
 1. Default validation benchmark
 
@@ -227,6 +302,34 @@ Batch mode now carries the same sanity fields in the exported summary CSV for sp
 - `Sanity_RelErr_*` columns for the extracted quantities
 
 
+Recommendation Evaluator
+------------------------
+
+The recommendation evaluator uses the current Tomchuk pipeline and sweeps a grid of:
+
+- `q_max`
+- `1D bins`
+
+For each combination it records:
+
+- recovered `p` from `PDI`
+- recovered `p` from `PDI2`
+- absolute and relative error in `p`
+- `chi2` of the reconstructed SAXS fits from `PDI` and `PDI2`
+- whether the recovered values pass the requested target absolute error
+
+It then reports:
+
+- the single best combination by worst-case absolute `p` error
+- a safety zone around the best combination
+- the number of combinations that hit the requested target for both `PDI` and `PDI2`
+
+This is available in two places:
+
+- the single-mode Streamlit UI through the `Evaluate q-range / bins` button
+- the CLI validator through `--recommend-settings`
+
+
 5. Flux sweep at fixed geometry
 
 Benchmark setup:
@@ -257,6 +360,152 @@ Sanity-check interpretation:
 - When `PDI2` fails for cases such as `Schulz`, the likely issue is the current `Q` and `lc` extraction strategy from the finite simulated curve, not the detector count itself.
 
 Practical takeaway:
+
+- raising photon count helps the extraction stabilize quickly
+- after about `1e8` to `1e10` photons in the current Gaussian benchmark, additional count changes little
+- remaining error is dominated by model / inversion bias, not counting noise
+
+
+6. Higher-resolution Tomchuk benchmark
+
+Benchmark setup:
+
+- `distribution = Gaussian`
+- `p = 0.7`
+- `mean_rg = 4.0 nm`
+- `pixels = 1024`
+- `n_bins = 1024`
+- `smearing = 2.0`
+- `flux = 1e12`
+- `q_max = 4.0`
+
+Command:
+
+```bash
+python validate_tomchuk.py --distributions Gaussian --p-values 0.7 --mean-rg 4.0 --q-max 4.0 --n-bins 1024 --pixels 1024 --smearing 2.0 --flux 1e12 --max-rel-error 0.2
+```
+
+Observed result:
+
+- extraction path selected: `unified_fit`
+- recovered `p = 0.6177` from `PDI`
+- recovered `p = 0.7070` from `PDI2`
+- relative error: `-11.8%` for `PDI`, `+1.0%` for `PDI2`
+- sanity errors for the extracted invariants stayed small:
+  - `Rg: -2.4%`
+  - `G: -1.6%`
+  - `B: +4.4%`
+  - `Q: +1.7%`
+  - `lc: -0.6%`
+  - `PDI2: +2.1%`
+
+Interpretation:
+
+- at this higher-resolution setting, the code is extracting the Tomchuk invariants much more cleanly than before
+- `PDI2` works well in this benchmark
+- `PDI` still shows noticeable bias
+- this suggests the main residual weakness is now the `PDI -> p` inversion for some families, not the raw extraction of `G`, `Rg`, `B`, `Q`, and `lc`
+
+
+7. Photon-count sweep at higher resolution
+
+Benchmark setup:
+
+- `distribution = Gaussian`
+- `p = 0.7`
+- `mean_rg = 4.0 nm`
+- `pixels = 1024`
+- `n_bins = 1024`
+- `smearing = 2.0`
+- `q_max = 4.0`
+- `noise = True`
+- `flux = 1e6, 1e8, 1e10, 1e12`
+
+Observed behavior:
+
+- `1e6`: `p(PDI) = 0.5891`, `p(PDI2) = 0.6700`
+- `1e8`: `p(PDI) = 0.6159`, `p(PDI2) = 0.7048`
+- `1e10`: `p(PDI) = 0.6175`, `p(PDI2) = 0.7068`
+- `1e12`: `p(PDI) = 0.6177`, `p(PDI2) = 0.7070`
+
+Interpretation:
+
+- the result stabilizes quickly as flux increases
+- by `1e8` to `1e10`, the current Gaussian benchmark is effectively count-limited no longer
+- the remaining `PDI` bias is systematic
+- the `PDI2` route is the more reliable Tomchuk recovery path in this benchmark
+
+
+8. Higher-resolution multi-distribution sweep
+
+Benchmark setup:
+
+- `p = 0.7`
+- `mean_rg = 4.0 nm`
+- `pixels = 1024`
+- `n_bins = 1024`
+- `smearing = 2.0`
+- `q_max = 4.0`
+- `flux = 1e12`
+
+Command:
+
+```bash
+python validate_tomchuk.py --distributions Gaussian Lognormal Schulz Boltzmann Triangular Uniform --p-values 0.7 --mean-rg 4.0 --q-max 4.0 --n-bins 1024 --pixels 1024 --smearing 2.0 --flux 1e12 --max-rel-error 2.0
+```
+
+Observed result summary:
+
+- `Gaussian`: `PDI2` works well, `PDI` still runs low
+- `Lognormal`: `PDI2` is acceptable, `PDI` fails badly low
+- `Schulz`: both `PDI` and `PDI2` remain unreliable in this setting
+- `Boltzmann`: `PDI2` is acceptable, `PDI` fails badly low
+- `Triangular`: `PDI` collapses to zero, `PDI2` stays biased high
+- `Uniform`: `PDI` collapses to zero, `PDI2` stays biased high
+
+Why the failures happen:
+
+- for `Gaussian` and often `Boltzmann`, the extracted invariants are already fairly good, but the `PDI -> p` mapping remains the weak step
+- for `Lognormal`, `Schulz`, `Triangular`, and `Uniform`, the recovered mean size and `PDI` pathway remain unstable enough that higher detector resolution and higher count alone do not fix the inversion
+- triangular and uniform families are especially fragile because small shifts in the extracted invariants move the recovered `p` sharply
+- this means that better data helps, but it does not guarantee full recovery for every declared family under the current inversion formulas
+
+
+9. Recommendation example for the default low-p Gaussian case
+
+Benchmark setup:
+
+- `distribution = Gaussian`
+- `mean_rg = 2.0 nm`
+- `p = 0.3`
+- `pixels = 1024`
+- `smearing = 1.0`
+- `q_min = 0`
+- `binning = logarithmic`
+- `noise = False`
+- `flux = 1e12`
+- target absolute `p` error for both `PDI` and `PDI2`: `0.01`
+
+Command:
+
+```bash
+python validate_tomchuk.py --distributions Gaussian --p-values 0.3 --mean-rg 2.0 --q-max 2.5 --n-bins 256 --pixels 1024 --smearing 1.0 --flux 1e12 --recommend-settings --target-abs-error 0.01 --max-rel-error 1.0
+```
+
+Observed result:
+
+- best compromise found by the sweep: `q_max = 2.0`, `bins = 2048`
+- recovered `p(PDI) = 0.3832`
+- recovered `p(PDI2) = 0.2127`
+- best-case worst absolute error in `p`: `0.0873`
+- safety zone: `q_max = 2.0`, `bins = 128..2048`
+- target hits at `0.01`: `0`
+
+Interpretation:
+
+- for this low-polydispersity default case, the current Tomchuk implementation does not produce a region where both `PDI` and `PDI2` recover `p` to within `0.01`
+- the recommendation tool is therefore useful not only for finding good settings, but also for showing honestly when no truly accurate zone exists
+- this is consistent with the known limitation that Tomchuk analysis is much more reliable for more strongly polydisperse sphere systems
 
 - Higher photon count helps, but it is not the main fix if `PDI` or `PDI2` are consistently biased.
 - If the sanity checker flags `PDI2`, inspect the `Q/lc` integration and tail correction path first.

@@ -7,7 +7,17 @@ import numpy as np
 import plotly.graph_objects as go
 import pandas as pd
 from sim_utils import run_simulation_core, get_distribution
-from analysis_utils import perform_saxs_analysis, get_header_string, create_intensity_csv, create_distribution_csv, parse_saxs_file
+from analysis_utils import (
+    perform_saxs_analysis,
+    get_header_string,
+    create_intensity_csv,
+    create_distribution_csv,
+    parse_saxs_file,
+    build_sanity_summary_row,
+    build_reconstruction_quality_summary,
+    recommend_tomchuk_settings,
+    calculate_sphere_theoretical_parameters,
+)
 
 def run():
     st.sidebar.title("Configuration")
@@ -86,6 +96,37 @@ def run():
     optimal_flux = st.sidebar.checkbox("Optimal Flux (No Noise)", value=False, key='optimal_flux')
     add_noise = st.sidebar.checkbox("Simulate Poisson Noise", value=True, disabled=optimal_flux, key='add_noise')
 
+    recommendation = None
+    if mode_key == 'Sphere' and analysis_method == 'Tomchuk':
+        st.sidebar.header("Tomchuk Evaluator")
+        target_abs_error = st.sidebar.number_input(
+            "Target abs. p error",
+            min_value=0.001,
+            max_value=1.0,
+            value=0.01,
+            step=0.005,
+            key='tomchuk_target_abs_error'
+        )
+        recommendation_key = (mean_rg, p_val, dist_type, pixels, smearing, flux_pre, flux_exp, optimal_flux, add_noise, target_abs_error)
+        if st.sidebar.button("Evaluate q-range / bins", key='eval_tomchuk_grid'):
+            with st.spinner("Sweeping q-range and 1D bins..."):
+                recommendation = recommend_tomchuk_settings(
+                    mean_rg=mean_rg,
+                    p_val=p_val,
+                    dist_type=dist_type,
+                    pixels=pixels,
+                    smearing=smearing,
+                    flux=flux_pre * (10**flux_exp),
+                    noise=(not optimal_flux and add_noise),
+                    q_min=q_min,
+                    binning_mode=binning_mode,
+                    target_abs_error=target_abs_error,
+                )
+                st.session_state['tomchuk_recommendation'] = recommendation
+                st.session_state['tomchuk_recommendation_key'] = recommendation_key
+        if st.session_state.get('tomchuk_recommendation_key') == recommendation_key:
+            recommendation = st.session_state.get('tomchuk_recommendation')
+
     # --- Run Simulation ---
     params = {
         'mean_rg': mean_rg, 'p_val': p_val, 'dist_type': dist_type, 'mode': mode_key,
@@ -107,6 +148,12 @@ def run():
 
     # Run Analysis
     analysis_res = perform_saxs_analysis(q_target, i_target, dist_type, mean_rg, mode_key, analysis_method, nnls_max_rg)
+    reconstruction_summary = build_reconstruction_quality_summary(analysis_res) if analysis_method == 'Tomchuk' else None
+    sanity_summary = None
+    theoretical_values = None
+    if (not use_experimental) and mode_key == 'Sphere' and analysis_method == 'Tomchuk':
+        sanity_summary = build_sanity_summary_row(q_target, i_target, r_vals, pdf_vals, analysis_res)
+        theoretical_values = calculate_sphere_theoretical_parameters(q_target, i_target, r_vals, pdf_vals)
 
     # --- Define Input Label EARLY for use in all columns ---
     input_label = "Ref (Sidebar)" if use_experimental else "Input"
@@ -127,7 +174,7 @@ def run():
                 colorscale='Jet',
                 colorbar=dict(title='log10(I)')
             ))
-            fig_2d.update_layout(xaxis_title='qx', yaxis_title='qy', width=500, height=500, margin=dict(l=40,r=40,t=20,b=40), yaxis=dict(scaleanchor="x", scaleratio=1))
+            fig_2d.update_layout(xaxis_title='qx', yaxis_title='qy', width=470, height=360, margin=dict(l=30,r=30,t=20,b=30), yaxis=dict(scaleanchor="x", scaleratio=1))
             st.plotly_chart(fig_2d)
 
     with col_viz2:
@@ -174,12 +221,12 @@ def run():
             if 'B' in analysis_res and analysis_res['B'] > 0:
                 fig_1d.add_hline(y=analysis_res['B'], line_dash="dot", line_color="red", annotation_text="B (Fit)")
 
-        fig_1d.update_layout(xaxis_title=x_label, yaxis_title=y_label, xaxis_type=x_type, yaxis_type=y_type, width=500, height=450, margin=dict(l=40,r=40,t=20,b=40))
+        fig_1d.update_layout(xaxis_title=x_label, yaxis_title=y_label, xaxis_type=x_type, yaxis_type=y_type, width=470, height=360, margin=dict(l=30,r=30,t=20,b=30))
         st.plotly_chart(fig_1d)
 
     # --- Results & Distribution Visuals ---
-    st.markdown("---"); st.subheader("Analysis Results")
-    c1, c2, c3 = st.columns(3)
+    st.markdown("---")
+    c1, c2, c3, c4 = st.columns(4)
     
     with c1:
         st.markdown("**Parameters**")
@@ -199,16 +246,87 @@ def run():
             st.metric("Chi-Square (Red.)", f"{analysis_res.get('chi2', 0):.2f}")
 
     with c2:
-        st.markdown("**Invariants & Fit**")
-        val_list = [f"{analysis_res.get('Rg', 0):.2f} nm", f"{analysis_res.get('G', 0):.2e}"]
-        param_list = ["Rg (Guinier)", "G"]
+        st.markdown("**Extracted Values**")
         if analysis_method == 'Tomchuk':
-            val_list.extend([f"{analysis_res.get('Q', 0):.2e}", f"{analysis_res.get('lc', 0):.2f} nm", f"{analysis_res.get('B', 0):.2e}"])
-            param_list.extend(["Q", "lc", "B"])
-        res_df = pd.DataFrame({"Parameter": param_list, "Value": val_list})
-        st.dataframe(res_df, hide_index=True, width='stretch')
+            st.metric("Tomchuk Path", analysis_res.get('tomchuk_extraction', 'n/a'))
+        val_list = [f"{analysis_res.get('Rg', 0):.2f} nm", f"{analysis_res.get('G', 0):.2e}"]
+        theory_list = ["n/a", "n/a"]
+        param_list = ["Rg (Extracted)", "G"]
+        if analysis_method == 'Tomchuk':
+            val_list.extend([
+                f"{analysis_res.get('Q', 0):.2e}",
+                f"{analysis_res.get('lc', 0):.2f} nm",
+                f"{analysis_res.get('B', 0):.2e}",
+                f"{analysis_res.get('PDI', 0):.4f}",
+                f"{analysis_res.get('PDI2', 0):.4f}",
+            ])
+            theory_list.extend(["n/a", "n/a", "n/a", "n/a", "n/a"])
+            param_list.extend(["Q", "lc", "B", "PDI", "PDI2"])
+            if theoretical_values is not None:
+                theory_list = [
+                    f"{theoretical_values.get('Rg', 0):.2f} nm",
+                    f"{theoretical_values.get('G', 0):.2e}",
+                    f"{theoretical_values.get('Q', 0):.2e}",
+                    f"{theoretical_values.get('lc', 0):.2f} nm",
+                    f"{theoretical_values.get('B', 0):.2e}",
+                    f"{theoretical_values.get('PDI', 0):.4f}",
+                    f"{theoretical_values.get('PDI2', 0):.4f}",
+                ]
+        res_df = pd.DataFrame({"Parameter": param_list, "Extracted": val_list, "Theory": theory_list})
+        st.dataframe(res_df, hide_index=True, width='stretch', height=230)
+        if reconstruction_summary is not None:
+            recon_rows = pd.DataFrame([
+                {"Variant": "PDI", "Chi2": f"{reconstruction_summary['chi2_pdi']:.2f}", "Quality": reconstruction_summary['quality_pdi']},
+                {"Variant": "PDI2", "Chi2": f"{reconstruction_summary['chi2_pdi2']:.2f}", "Quality": reconstruction_summary['quality_pdi2']},
+            ])
+            st.caption(f"Best reconstructed fit: {reconstruction_summary['best_variant']}")
+            st.dataframe(recon_rows, hide_index=True, width='stretch', height=115)
 
     with c3:
+        st.markdown("**Sanity Check**")
+        if sanity_summary is None:
+            if use_experimental:
+                st.caption("Unavailable for uploaded data because the true simulated distribution is not known.")
+            elif mode_key != 'Sphere' or analysis_method != 'Tomchuk':
+                st.caption("Shown for simulated sphere runs in Tomchuk mode.")
+        else:
+            st.metric("Sanity", "PASS" if sanity_summary.get('Sanity_Pass') else "CHECK")
+            st.caption(f"Failures: {sanity_summary.get('Sanity_Failures', 'none')}")
+            sanity_rows = []
+            for key in ['PDI', 'PDI2', 'p_rec_pdi', 'p_rec_pdi2', 'mean_radius_pdi', 'mean_radius_pdi2']:
+                rel_key = f'Sanity_RelErr_{key}'
+                if rel_key in sanity_summary:
+                    sanity_rows.append({
+                        "Metric": key,
+                        "RelErr": f"{sanity_summary[rel_key]:+.2%}",
+                    })
+            if sanity_rows:
+                st.dataframe(pd.DataFrame(sanity_rows), hide_index=True, width='stretch', height=170)
+            st.caption(sanity_summary.get('Sanity_Suggestions', ''))
+        if recommendation:
+            st.markdown("**Recommended q / bins**")
+            best = recommendation.get('best')
+            safety = recommendation.get('safety_zone')
+            if best:
+                st.caption(
+                    f"Best: q_max={best['q_max']:.2f}, bins={best['n_bins']}, "
+                    f"p(PDI)={best['p_pdi']:.3f}, p(PDI2)={best['p_pdi2']:.3f}"
+                )
+                st.caption(
+                    f"Max abs. p error={best['max_abs_err']:.3f}; "
+                    f"best fit={best['best_variant']} (chi2={best['best_chi2']:.2f})"
+                )
+            if safety:
+                st.caption(
+                    f"Safety zone: q_max {safety['q_max_min']:.2f}-{safety['q_max_max']:.2f}, "
+                    f"bins {safety['n_bins_min']}-{safety['n_bins_max']}"
+                )
+            st.caption(
+                f"Target hits: {len(recommendation.get('passing_rows', []))} combinations at "
+                f"abs. p error <= {recommendation.get('target_abs_error', 0):.3f}"
+            )
+
+    with c4:
         st.markdown("**Recovered Distribution**")
         fig_dist = go.Figure()
         # Input PDF (dashed gray)
@@ -233,7 +351,7 @@ def run():
                 rec_dists_dl['nnls_r'] = analysis_res['nnls_r']
                 rec_dists_dl['nnls_pdf'] = analysis_res.get('nnls_pdf', analysis_res['nnls_w'])
         
-        fig_dist.update_layout(xaxis_title="Radius (nm)", yaxis_title="Prob", width=400, height=350, margin=dict(l=40,r=40,t=20,b=40))
+        fig_dist.update_layout(xaxis_title="Radius (nm)", yaxis_title="Prob", width=320, height=250, margin=dict(l=25,r=25,t=20,b=25))
         st.plotly_chart(fig_dist)
 
     # Download

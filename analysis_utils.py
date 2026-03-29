@@ -196,6 +196,154 @@ def fit_unified_beaucage(q_exp, i_exp, rg_init, g_init):
         'I_fit': unified_beaucage_intensity(q_exp, *best),
     }
 
+def estimate_guinier_parameters(q_exp, i_exp, initial_rg_guess, mode):
+    if len(q_exp) < 5:
+        return 0.0, 0.0, False
+
+    rg_init = float(initial_rg_guess)
+    try:
+        valid_pts = (q_exp > 0) & (i_exp > 0)
+        q_v = q_exp[valid_pts]
+        i_v = i_exp[valid_pts]
+        if len(q_v) > 5:
+            n_init = min(15, len(q_v))
+            x_init = q_v[:n_init] ** 2
+            y_init = np.log(i_v[:n_init])
+            slope_init, _ = np.polyfit(x_init, y_init, 1)
+            if slope_init < 0:
+                rg_est = np.sqrt(-3 * slope_init)
+                if rg_est > 0:
+                    rg_init = rg_est
+    except Exception:
+        pass
+
+    rg_fit = max(rg_init, 1e-6)
+    g_fit = float(i_exp[0]) if len(i_exp) > 0 else 1.0
+    valid_fit = False
+    for _ in range(5):
+        limit = 1.0 if mode == 'IDP' else 0.9
+        mask = (q_exp * rg_fit) < limit
+        mask = mask & (q_exp > 0) & (i_exp > 0)
+        if np.sum(mask) < 4:
+            break
+        x_fit = q_exp[mask] ** 2
+        y_fit = np.log(i_exp[mask])
+        try:
+            slope, intercept = np.polyfit(x_fit, y_fit, 1)
+            if slope >= 0:
+                break
+            rg_fit = np.sqrt(np.abs(-3 * slope))
+            g_fit = np.exp(intercept)
+            valid_fit = True
+        except Exception:
+            break
+
+    return float(rg_fit), float(g_fit), bool(valid_fit)
+
+def compute_tomchuk_analytic_quantities(G, Rg, B):
+    if G <= 0 or Rg <= 0 or B < 0:
+        return {
+            'Q': 0.0,
+            'lc': 0.0,
+            'PDI': 0.0,
+            'PDI2': 0.0,
+        }
+
+    q_val = ((3.0 * np.sqrt(3.0 * np.pi)) * G) / (4.0 * (Rg ** 3))
+    q_val += (B * Rg * TOMCHUK_C1) / np.sqrt(6.0)
+
+    lc_val = 0.0
+    if q_val > 0:
+        lc_val = (3.0 * np.pi * G) / (2.0 * (Rg ** 2) * q_val)
+        lc_val += (np.pi * B * (Rg ** 2) * TOMCHUK_C2) / (6.0 * q_val)
+
+    pdi_val = (50.0 / 81.0) * (B * (Rg ** 4)) / G if G > 0 else 0.0
+    pdi2_val = (2.0 * np.pi / 9.0) * (B * lc_val) / q_val if q_val > 0 and lc_val > 0 else 0.0
+
+    return {
+        'Q': float(q_val),
+        'lc': float(lc_val),
+        'PDI': float(pdi_val),
+        'PDI2': float(pdi2_val),
+    }
+
+def compute_tomchuk_hybrid_quantities(q_exp, i_exp, G, Rg):
+    n_fit_b = max(8, min(40, len(q_exp) // 6))
+    b_est = 0.0
+    if n_fit_b > 0:
+        b_region_i = i_exp[-n_fit_b:]
+        b_region_q = q_exp[-n_fit_b:]
+        b_est = np.median(b_region_i * (b_region_q ** 4))
+        if not np.isfinite(b_est) or b_est < 0:
+            b_est = 0.0
+
+    q_val = 0.0
+    lc_val = 0.0
+    if G > 0 and Rg > 0 and len(q_exp) > 0:
+        q_max_meas = q_exp[-1]
+        integrand_q = (q_exp ** 2) * i_exp
+        q_obs = trapezoid(integrand_q, q_exp)
+        q_tail = b_est / q_max_meas if q_max_meas > 0 else 0.0
+        q_val = q_obs + q_tail
+
+        integrand_lc = q_exp * i_exp
+        lin_obs = trapezoid(integrand_lc, q_exp)
+        lin_tail = b_est / (2.0 * q_max_meas ** 2) if q_max_meas > 0 else 0.0
+        lc_val = (np.pi / q_val) * (lin_obs + lin_tail) if q_val > 0 else 0.0
+
+    pdi_val = (50.0 / 81.0) * (b_est * (Rg ** 4)) / G if G > 0 and Rg > 0 else 0.0
+    pdi2_val = (2.0 * np.pi / 9.0) * (b_est * lc_val) / q_val if q_val > 0 and lc_val > 0 else 0.0
+
+    return {
+        'B': float(b_est),
+        'Q': float(q_val),
+        'lc': float(lc_val),
+        'PDI': float(pdi_val),
+        'PDI2': float(pdi2_val),
+    }
+
+def extract_tomchuk_parameters(q_exp, i_exp, initial_rg_guess):
+    rg_guinier, g_guinier, valid_guinier = estimate_guinier_parameters(q_exp, i_exp, initial_rg_guess, 'Sphere')
+    fit_res = fit_unified_beaucage(q_exp, i_exp, rg_guinier, g_guinier) if valid_guinier else None
+
+    hybrid = compute_tomchuk_hybrid_quantities(q_exp, i_exp, g_guinier, rg_guinier)
+    unified = None
+    if fit_res:
+        unified = {'G': fit_res['G'], 'Rg': fit_res['Rg'], 'B': fit_res['B']}
+        unified.update(compute_tomchuk_analytic_quantities(fit_res['G'], fit_res['Rg'], fit_res['B']))
+
+    extraction_source = 'hybrid'
+    selected = {
+        'Rg': float(rg_guinier),
+        'G': float(g_guinier),
+        'B': float(hybrid['B']),
+        'Q': float(hybrid['Q']),
+        'lc': float(hybrid['lc']),
+        'PDI': float(hybrid['PDI']),
+        'PDI2': float(hybrid['PDI2']),
+    }
+    if unified and unified['G'] > 0 and unified['Rg'] > 0 and unified['B'] >= 0 and unified['Q'] > 0 and unified['lc'] > 0:
+        extraction_source = 'unified_fit'
+        selected = {
+            'Rg': float(unified['Rg']),
+            'G': float(unified['G']),
+            'B': float(unified['B']),
+            'Q': float(unified['Q']),
+            'lc': float(unified['lc']),
+            'PDI': float(unified['PDI']),
+            'PDI2': float(unified['PDI2']),
+        }
+
+    return {
+        'selected': selected,
+        'source': extraction_source,
+        'guinier_valid': valid_guinier,
+        'guinier': {'Rg': float(rg_guinier), 'G': float(g_guinier)},
+        'hybrid': hybrid,
+        'unified': unified,
+        'fit_res': fit_res,
+    }
+
 def recover_distribution_nnls(q_exp, i_exp, q_min, q_max, kernel_func, max_rg_basis):
     if q_min <= 0: q_min_eff = 1e-3
     else: q_min_eff = q_min
@@ -265,49 +413,13 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
         'rg_num_rec_pdi': 0, 'rg_num_rec_pdi2': 0,
         'p_rec': 0, 'rg_num_rec': 0, 'mean_r_rec': 0,
         'I_fit_pdi': [], 'I_fit_pdi2': [], 'I_fit': [], 'I_fit_unified': [],
-        'chi2_pdi': 0, 'chi2_pdi2': 0, 'chi2': 0
+        'chi2_pdi': 0, 'chi2_pdi2': 0, 'chi2': 0,
+        'tomchuk_extraction': 'none',
     }
     
     if len(q_exp) < 5: return results
 
-    rg_init = initial_rg_guess
-    try:
-        valid_pts = (q_exp > 0) & (i_exp > 0)
-        q_v = q_exp[valid_pts]
-        i_v = i_exp[valid_pts]
-        if len(q_v) > 5:
-            n_init = min(15, len(q_v))
-            x_init = q_v[:n_init]**2
-            y_init = np.log(i_v[:n_init])
-            slope_init, _ = np.polyfit(x_init, y_init, 1)
-            if slope_init < 0:
-                rg_est = np.sqrt(-3 * slope_init)
-                if rg_est > 0: rg_init = rg_est
-    except:
-        pass
-
-    rg_fit = rg_init
-    g_fit = i_exp[0] if len(i_exp) > 0 else 1.0
-    valid_fit = False
-
-    for _ in range(5): 
-        limit = 1.0 if mode == 'IDP' else 0.9
-        mask = (q_exp * rg_fit) < limit
-        mask = mask & (q_exp > 0) & (i_exp > 0)
-        if np.sum(mask) < 4: break
-        x_fit = q_exp[mask]**2
-        y_fit = np.log(i_exp[mask])
-        try:
-            slope, intercept = np.polyfit(x_fit, y_fit, 1)
-            if slope >= 0: break 
-            rg_new = np.sqrt(np.abs(-3 * slope))
-            g_new = np.exp(intercept)
-            rg_fit = rg_new
-            g_fit = g_new
-            valid_fit = True
-        except:
-            break
-            
+    rg_fit, g_fit, valid_fit = estimate_guinier_parameters(q_exp, i_exp, initial_rg_guess, mode)
     results['Rg'] = rg_fit
     results['G'] = g_fit
 
@@ -315,48 +427,30 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
 
     if mode == 'Sphere':
         if method == 'Tomchuk':
-            fit_res = fit_unified_beaucage(q_exp, i_exp, rg_fit, g_fit)
+            extraction = extract_tomchuk_parameters(q_exp, i_exp, initial_rg_guess)
+            fit_res = extraction.get('fit_res')
             if fit_res:
                 results['I_fit_unified'] = fit_res['I_fit']
-            n_fit_b = max(8, min(40, len(q_exp) // 6))
-            B_est = 0
-            if n_fit_b > 0:
-                b_region_i = i_exp[-n_fit_b:]
-                b_region_q = q_exp[-n_fit_b:]
-                B_est = np.median(b_region_i * (b_region_q ** 4))
-                if not np.isfinite(B_est) or B_est < 0:
-                    B_est = 0
+            selected = extraction['selected']
+            rg_fit = selected['Rg']
+            g_fit = selected['G']
+            b_est = selected['B']
+            q_val = selected['Q']
+            lc_val = selected['lc']
+            pdi_val = selected['PDI']
+            pdi2_val = selected['PDI2']
 
-            Q = 0
-            lc = 0
-            if valid_fit and rg_fit > 0:
-                q_max_meas = q_exp[-1] if len(q_exp) > 0 else 0
-                integrand_q = (q_exp ** 2) * i_exp
-                Q_obs = trapezoid(integrand_q, q_exp)
-                Q_tail = B_est / q_max_meas if q_max_meas > 0 else 0
-                Q = Q_obs + Q_tail
-
-                integrand_lc = q_exp * i_exp
-                lin_obs = trapezoid(integrand_lc, q_exp)
-                lin_tail = B_est / (2 * q_max_meas ** 2) if q_max_meas > 0 else 0
-                lc = (np.pi / Q) * (lin_obs + lin_tail) if Q > 0 else 0
-
-            pdi_val = 0
-            if valid_fit and g_fit > 0:
-                pdi_val = (50.0/81.0) * (B_est * (rg_fit**4)) / g_fit
-            pdi2_val = 0
-            if Q > 0 and lc > 0:
-                pdi2_val = (2 * np.pi / 9) * (B_est * lc) / Q
-                
             p_rec_pdi = solve_p_tomchuk(pdi_val, 'PDI', dist_type)
             p_rec_pdi2 = solve_p_tomchuk(pdi2_val, 'PDI2', dist_type)
             
             mean_r_rec = get_calculated_mean_radius(rg_fit, p_rec_pdi, dist_type)
             mean_r_rec_2 = get_calculated_mean_radius(rg_fit, p_rec_pdi2, dist_type)
 
-            results['Q'] = Q
-            results['lc'] = lc
-            results['B'] = B_est
+            results['Rg'] = rg_fit
+            results['G'] = g_fit
+            results['Q'] = q_val
+            results['lc'] = lc_val
+            results['B'] = b_est
             results['PDI'] = pdi_val
             results['PDI2'] = pdi2_val
             results['p_rec_pdi'] = p_rec_pdi
@@ -366,6 +460,9 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             results['rg_num_rec_pdi'] = mean_radius_to_mean_rg(mean_r_rec)
             results['rg_num_rec_pdi2'] = mean_radius_to_mean_rg(mean_r_rec_2)
             results['method'] = 'Tomchuk'
+            results['tomchuk_extraction'] = extraction['source']
+            results['tomchuk_hybrid'] = extraction['hybrid']
+            results['tomchuk_unified'] = extraction['unified']
             
             # --- Reconstruct Fits for PDI and PDI2 ---
             max_rec_r = max(mean_r_rec, mean_r_rec_2, 0)
@@ -439,6 +536,7 @@ def get_header_string(params, analysis_res):
     
     if params['method'] == 'Tomchuk':
         header_lines.extend([
+            f"#   Tomchuk Extraction Path: {analysis_res.get('tomchuk_extraction', 'n/a')}",
             f"#   B (Porod Constant): {analysis_res.get('B', 0):.6e}",
             f"#   Porod Invariant (Q): {analysis_res.get('Q', 0):.6e}",
             f"#   PDI (Calculated): {analysis_res.get('PDI', 0):.6f}",
@@ -541,6 +639,7 @@ def build_summary_row(params, analysis_res, base_row=None):
         rec_p_2 = analysis_res.get('p_rec_pdi2', 0)
         rec_size_2 = get_recovered_size(analysis_res, params, variant='pdi2')
         summary_row.update({
+            'Tomchuk_Extraction': analysis_res.get('tomchuk_extraction', 'none'),
             'Recovered_p_PDI2': rec_p_2,
             'Recovered_Size_PDI2': rec_size_2,
             'Rel_Err_p_PDI2': (rec_p_2 - p_true) / p_true if p_true != 0 else 0,
@@ -652,13 +751,13 @@ def evaluate_tomchuk_sanity_checks(q_vals, i_vals, r_vals, pdf_vals, analysis_re
 
     suggestions = []
     if any(key in failures for key in ('Rg', 'G')):
-        suggestions.append("Low-q extraction looks unstable: inspect the Guinier window and the low-q sampling range.")
+        suggestions.append("Low-q extraction looks unstable: inspect the Guinier window, reduce smearing, and keep enough low-q points below qRg about 1.")
     if 'B' in failures:
-        suggestions.append("High-q Porod extraction looks unstable: inspect the high-q tail, q-range, and B estimation strategy.")
+        suggestions.append("High-q Porod extraction looks unstable: extend q_max, reduce smearing, and check whether the fitted unified model is capturing the Porod tail.")
     if any(key in failures for key in ('Q', 'lc', 'PDI2', 'p_rec_pdi2')):
-        suggestions.append("Invariant-based extraction is drifting: inspect Q/lc integration limits, tail corrections, and PDI2 handling.")
+        suggestions.append("Invariant-based extraction is drifting: prefer the unified-fit analytic Q/lc path, extend the measured q-range, and inspect any residual tail-correction dependence.")
     if any(key in failures for key in ('PDI', 'p_rec_pdi')):
-        suggestions.append("PDI-based recovery is drifting: inspect the consistency of G, Rg, and B extraction against the simulated curve.")
+        suggestions.append("PDI-based recovery is drifting: inspect the consistency of G, Rg, and B extraction against the simulated curve and compare unified-fit versus hybrid estimates.")
     if any(key in failures for key in ('mean_radius_pdi', 'mean_radius_pdi2')):
         suggestions.append("Recovered mean size is drifting: inspect moment-to-size conversion and the chosen distribution family.")
     if not suggestions:
@@ -684,6 +783,147 @@ def build_sanity_summary_row(q_vals, i_vals, r_vals, pdf_vals, analysis_res, rel
     for key, value in sanity['metrics'].items():
         summary_row[f'Sanity_RelErr_{key}'] = value['rel_err']
     return summary_row
+
+def classify_reconstruction_quality(chi2):
+    if not np.isfinite(chi2) or chi2 <= 0:
+        return "n/a"
+    if chi2 <= 2.0:
+        return "strong"
+    if chi2 <= 5.0:
+        return "usable"
+    if chi2 <= 10.0:
+        return "weak"
+    return "poor"
+
+def build_reconstruction_quality_summary(analysis_res):
+    chi2_pdi = float(analysis_res.get('chi2_pdi', 0))
+    chi2_pdi2 = float(analysis_res.get('chi2_pdi2', 0))
+    summary = {
+        'chi2_pdi': chi2_pdi,
+        'chi2_pdi2': chi2_pdi2,
+        'quality_pdi': classify_reconstruction_quality(chi2_pdi),
+        'quality_pdi2': classify_reconstruction_quality(chi2_pdi2),
+        'best_variant': 'n/a',
+        'best_chi2': 0.0,
+    }
+    candidates = []
+    if chi2_pdi > 0:
+        candidates.append(('PDI', chi2_pdi))
+    if chi2_pdi2 > 0:
+        candidates.append(('PDI2', chi2_pdi2))
+    if candidates:
+        best_variant, best_chi2 = min(candidates, key=lambda item: item[1])
+        summary['best_variant'] = best_variant
+        summary['best_chi2'] = best_chi2
+    return summary
+
+def recommend_tomchuk_settings(
+    mean_rg,
+    p_val,
+    dist_type='Gaussian',
+    pixels=1024,
+    smearing=1.0,
+    flux=1e12,
+    noise=False,
+    q_min=0.0,
+    binning_mode='Logarithmic',
+    q_max_values=None,
+    n_bin_values=None,
+    target_abs_error=0.01,
+    safety_margin=0.01,
+    mode='Sphere',
+):
+    if q_max_values is None:
+        q_max_values = [0.8, 1.2, 1.6, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0]
+    if n_bin_values is None:
+        n_bin_values = [128, 256, 512, 768, 1024, 1536, 2048]
+
+    rows = []
+    for q_max in q_max_values:
+        for n_bins in n_bin_values:
+            params = {
+                'mean_rg': float(mean_rg),
+                'p_val': float(p_val),
+                'dist_type': dist_type,
+                'mode': mode,
+                'pixels': int(pixels),
+                'q_min': float(q_min),
+                'q_max': float(q_max),
+                'n_bins': int(n_bins),
+                'smearing': float(smearing),
+                'flux': float(flux),
+                'noise': bool(noise),
+                'binning_mode': binning_mode,
+                'method': 'Tomchuk',
+                'nnls_max_rg': float(mean_rg) * (1 + 8 * float(p_val)),
+            }
+            q_sim, i_sim, r_vals, pdf_vals, analysis_res, _ = run_simulation_analysis_case(params)
+            summary = build_summary_row(params, analysis_res)
+            sanity_summary = build_sanity_summary_row(q_sim, i_sim, r_vals, pdf_vals, analysis_res)
+            reconstruction = build_reconstruction_quality_summary(analysis_res)
+
+            p_pdi = float(analysis_res.get('p_rec_pdi', 0))
+            p_pdi2 = float(analysis_res.get('p_rec_pdi2', 0))
+            abs_err_pdi = abs(p_pdi - float(p_val))
+            abs_err_pdi2 = abs(p_pdi2 - float(p_val))
+            row = {
+                'q_max': float(q_max),
+                'n_bins': int(n_bins),
+                'p_pdi': p_pdi,
+                'p_pdi2': p_pdi2,
+                'abs_err_pdi': abs_err_pdi,
+                'abs_err_pdi2': abs_err_pdi2,
+                'max_abs_err': max(abs_err_pdi, abs_err_pdi2),
+                'sum_abs_err': abs_err_pdi + abs_err_pdi2,
+                'rel_err_pdi': float(summary.get('Rel_Err_p', 0)),
+                'rel_err_pdi2': float(summary.get('Rel_Err_p_PDI2', 0)),
+                'chi2_pdi': reconstruction['chi2_pdi'],
+                'chi2_pdi2': reconstruction['chi2_pdi2'],
+                'quality_pdi': reconstruction['quality_pdi'],
+                'quality_pdi2': reconstruction['quality_pdi2'],
+                'best_variant': reconstruction['best_variant'],
+                'best_chi2': reconstruction['best_chi2'],
+                'sanity_pass': bool(sanity_summary.get('Sanity_Pass', False)),
+                'sanity_failures': sanity_summary.get('Sanity_Failures', 'none'),
+                'tomchuk_extraction': analysis_res.get('tomchuk_extraction', 'none'),
+                'meets_target': abs_err_pdi <= target_abs_error and abs_err_pdi2 <= target_abs_error,
+            }
+            rows.append(row)
+
+    if not rows:
+        return {
+            'rows': [],
+            'best': None,
+            'passing_rows': [],
+            'safety_zone': None,
+            'target_abs_error': target_abs_error,
+        }
+
+    rows = sorted(rows, key=lambda row: (row['max_abs_err'], row['sum_abs_err'], row['best_chi2'], row['q_max'], row['n_bins']))
+    best = rows[0]
+    passing_rows = [row for row in rows if row['meets_target']]
+    safety_rows = [
+        row for row in rows
+        if row['max_abs_err'] <= best['max_abs_err'] + safety_margin
+    ]
+    safety_zone = None
+    if safety_rows:
+        safety_zone = {
+            'q_max_min': min(row['q_max'] for row in safety_rows),
+            'q_max_max': max(row['q_max'] for row in safety_rows),
+            'n_bins_min': min(row['n_bins'] for row in safety_rows),
+            'n_bins_max': max(row['n_bins'] for row in safety_rows),
+            'count': len(safety_rows),
+        }
+
+    return {
+        'rows': rows,
+        'best': best,
+        'passing_rows': passing_rows,
+        'safety_zone': safety_zone,
+        'target_abs_error': target_abs_error,
+        'safety_margin': safety_margin,
+    }
 
 def run_simulation_analysis_case(params):
     q_sim, i_sim, _, r_vals, pdf_vals = run_simulation_core(params)

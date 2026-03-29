@@ -8,6 +8,8 @@ from analysis_utils import (
     run_simulation_analysis_case,
     build_summary_row,
     build_sanity_summary_row,
+    build_reconstruction_quality_summary,
+    recommend_tomchuk_settings,
 )
 
 
@@ -39,9 +41,14 @@ def run_case(dist_type, p_val, mean_rg, q_max, n_bins, flux, noise, pixels, smea
     q_sim, i_sim, r_vals, pdf_vals, res, _ = run_simulation_analysis_case(params)
     summary = build_summary_row(params, res)
     sanity_summary = build_sanity_summary_row(q_sim, i_sim, r_vals, pdf_vals, res)
+    reconstruction = build_reconstruction_quality_summary(res)
     return {
         "distribution": dist_type,
         "p_input": p_val,
+        "q_max": q_max,
+        "smearing": smearing,
+        "flux": flux,
+        "extraction": res.get("tomchuk_extraction", "unknown"),
         "p_pdi": res.get("p_rec_pdi", 0.0),
         "p_pdi2": res.get("p_rec_pdi2", 0.0),
         "rel_err_pdi": summary.get("Rel_Err_p", 0.0),
@@ -52,6 +59,9 @@ def run_case(dist_type, p_val, mean_rg, q_max, n_bins, flux, noise, pixels, smea
         "PDI2": res.get("PDI2", 0.0),
         "chi2_pdi": res.get("chi2_pdi", 0.0),
         "chi2_pdi2": res.get("chi2_pdi2", 0.0),
+        "quality_pdi": reconstruction["quality_pdi"],
+        "quality_pdi2": reconstruction["quality_pdi2"],
+        "best_variant": reconstruction["best_variant"],
         "sanity_failures": sanity_summary["Sanity_Failures"],
         "sanity_pass": sanity_summary["Sanity_Pass"],
         "sanity_suggestions": sanity_summary["Sanity_Suggestions"],
@@ -71,6 +81,8 @@ def parse_args():
     parser.add_argument("--noise", action="store_true")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--max-rel-error", type=float, default=0.20)
+    parser.add_argument("--recommend-settings", action="store_true")
+    parser.add_argument("--target-abs-error", type=float, default=0.01)
     return parser.parse_args()
 
 
@@ -111,6 +123,46 @@ def main():
             print(
                 f"- {row['distribution']} p={row['p_input']:.4f}: failed [{row['sanity_failures']}] -> {row['sanity_suggestions']}"
             )
+
+    if args.recommend_settings:
+        print("\nRecommended q-range / bin-count sweep:")
+        for dist_type in args.distributions:
+            for p_val in args.p_values:
+                recommendation = recommend_tomchuk_settings(
+                    mean_rg=args.mean_rg,
+                    p_val=p_val,
+                    dist_type=dist_type,
+                    pixels=args.pixels,
+                    smearing=args.smearing,
+                    flux=args.flux,
+                    noise=args.noise,
+                    q_min=0.0,
+                    binning_mode="Logarithmic",
+                    target_abs_error=args.target_abs_error,
+                )
+                best = recommendation.get("best")
+                safety = recommendation.get("safety_zone")
+                passing_rows = recommendation.get("passing_rows", [])
+                print(f"- {dist_type} p={p_val:.4f}:")
+                if best:
+                    print(
+                        "  best -> "
+                        f"q_max={best['q_max']:.3f}, bins={best['n_bins']}, "
+                        f"p(PDI)={best['p_pdi']:.4f}, p(PDI2)={best['p_pdi2']:.4f}, "
+                        f"max_abs_err={best['max_abs_err']:.4f}, best_variant={best['best_variant']}, "
+                        f"chi2(PDI)={best['chi2_pdi']:.2f}, chi2(PDI2)={best['chi2_pdi2']:.2f}"
+                    )
+                if safety:
+                    print(
+                        "  safety zone -> "
+                        f"q_max={safety['q_max_min']:.3f}..{safety['q_max_max']:.3f}, "
+                        f"bins={safety['n_bins_min']}..{safety['n_bins_max']} "
+                        f"({safety['count']} combinations within +{recommendation['safety_margin']:.4f} max-abs-error of the best case)"
+                    )
+                print(
+                    "  target hits -> "
+                    f"{len(passing_rows)} combinations with abs p error <= {args.target_abs_error:.4f} for both PDI and PDI2"
+                )
 
     if max(max_err_pdi, max_err_pdi2) > args.max_rel_error:
         print(
