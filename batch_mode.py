@@ -187,7 +187,7 @@ def run():
             for col in res_df.columns:
                 res_df[col] = pd.to_numeric(res_df[col], errors='ignore')
             
-            result_cols = ['Recovered_p', 'Recovered_Size', 'Rel_Err_p', 'Rel_Err_Size', 'Chi2', 
+            result_cols = ['Recovered_p', 'Recovered_Size', 'Rel_Err_p', 'Rel_Err_Size', 'RelRMS', 
                            'Recovered_p_PDI2', 'Recovered_Size_PDI2', 'Rel_Err_p_PDI2', 'Rel_Err_Size_PDI2']
             varying_cols = [c for c in res_df.columns if res_df[c].nunique() > 1 and c not in result_cols]
             

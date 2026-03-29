@@ -39,13 +39,37 @@ For Tomchuk analysis, the app now prefers the unified-fit path when it is availa
 This makes it easier to inspect whether failures come from the fitted model itself or from the older mixed extraction route.
 
 
+Normalization Of Simulated Data
+-------------------------------
+
+For simulated sphere runs in Tomchuk mode, the app now normalizes the simulated 1D profile before analysis.
+
+Why this is needed:
+
+- the simulator scales total detector counts using the chosen detector geometry and flux
+- that makes amplitude-carrying quantities such as `G`, `B`, and `Q` move when `q_max`, detector size, or flux are changed
+- that behavior is acceptable for raw detector counts, but it is not what we want in the theory-comparison table
+
+What the app does now:
+
+- it computes the scale that maps the input distribution’s theoretical 1D intensity shape onto the simulated 1D profile
+- it divides the simulated 1D profile by that scale before Tomchuk extraction
+- the extracted amplitudes are then compared against input-based theoretical values on the same normalization
+
+As a result:
+
+- the theory column in single mode now depends only on the declared input `mean_rg`, `p`, and distribution family
+- flux no longer changes extracted `G`, `B`, or `Q` after normalization
+- remaining changes with `q_max`, detector size, or smearing reflect extraction bias or detector-induced distortion rather than a simple scale mismatch
+
+
 New UI Diagnostics
 ------------------
 
 Single mode now exposes three extra Tomchuk diagnostics:
 
 - `Tomchuk Path`: shows whether the current analysis used `unified_fit` or `hybrid`
-- `Reconstructed Fit`: shows `chi2` for the SAXS curves reconstructed from the recovered `p` values from `PDI` and `PDI2`
+- `Reconstructed Fit`: shows relative RMS error for the SAXS curves reconstructed from the recovered `p` values from `PDI` and `PDI2`
 - `Recommended q / bins`: an on-demand sweep that searches for a practical `q_max` / `1D bins` region for the current settings
 
 The reconstructed-fit block is intended to answer a simple question:
@@ -54,10 +78,10 @@ The reconstructed-fit block is intended to answer a simple question:
 
 The quality labels are:
 
-- `strong`: reduced `chi2 <= 2`
-- `usable`: reduced `chi2 <= 5`
-- `weak`: reduced `chi2 <= 10`
-- `poor`: reduced `chi2 > 10`
+- `strong`: `RelRMS <= 0.02`
+- `usable`: `RelRMS <= 0.05`
+- `weak`: `RelRMS <= 0.10`
+- `poor`: `RelRMS > 0.10`
 
 These labels are intentionally conservative.
 
@@ -210,6 +234,11 @@ Important note:
 - those two are not always numerically identical because the simulated distribution is represented on a finite radius grid and some families are truncated at small radius
 - for that reason, the sanity layer is the better test of whether `G`, `Rg`, `B`, `Q`, `lc`, `PDI`, and `PDI2` were extracted consistently from the simulated curve
 
+Additional note on theory comparisons:
+
+- single mode now uses input-normalized theory for the extracted/theory table
+- for simulated sphere runs, the 1D profile is normalized before Tomchuk analysis so `G`, `B`, and `Q` can be compared directly to theory
+
 1. Default validation benchmark
 
 Command:
@@ -315,7 +344,7 @@ For each combination it records:
 - recovered `p` from `PDI`
 - recovered `p` from `PDI2`
 - absolute and relative error in `p`
-- `chi2` of the reconstructed SAXS fits from `PDI` and `PDI2`
+- relative RMS error of the reconstructed SAXS fits from `PDI` and `PDI2`
 - whether the recovered values pass the requested target absolute error
 
 It then reports:
@@ -506,6 +535,59 @@ Interpretation:
 - for this low-polydispersity default case, the current Tomchuk implementation does not produce a region where both `PDI` and `PDI2` recover `p` to within `0.01`
 - the recommendation tool is therefore useful not only for finding good settings, but also for showing honestly when no truly accurate zone exists
 - this is consistent with the known limitation that Tomchuk analysis is much more reliable for more strongly polydisperse sphere systems
+
+
+10. Validation of the simulated-data normalization
+
+Benchmark setup:
+
+- `distribution = Gaussian`
+- `mean_rg = 4.0 nm`
+- `p = 0.7`
+- `mode = Sphere`
+- `method = Tomchuk`
+- `noise = False`
+
+Validation result:
+
+After normalization of the simulated 1D profile:
+
+- changing `flux` no longer changes extracted `G`, `B`, or `Q`
+- the same case run at `flux = 1e6, 1e8, 1e10, 1e12` returns the same extracted amplitudes to numerical precision
+
+Example:
+
+- `flux = 1e6` -> `G = 7.446e6`, `B = 3.530e3`, `Q = 3.123e4`
+- `flux = 1e12` -> `G = 7.446e6`, `B = 3.530e3`, `Q = 3.123e4`
+
+What still changes after normalization:
+
+- changing `q_max`
+- changing detector size
+- changing smearing
+
+These still affect extracted values somewhat because they change the sampled curve and therefore the quality of the Guinier / unified / invariant extraction, not because of a raw scale mismatch.
+
+Observed behavior for the same `Gaussian, mean_rg = 4.0, p = 0.7` case:
+
+- `q_max` changes extracted `Rg`, `G`, `B`, `Q`, `lc`, `PDI`, and `PDI2` modestly
+- detector size changes them modestly as well
+- smearing also shifts them, especially the amplitude terms and the recovered `PDI`
+
+What does not change the input-based theory:
+
+- `q_max`
+- detector size
+- smearing
+- flux
+- noise setting
+- binning choice
+
+The input-based theoretical Tomchuk quantities depend only on:
+
+- `mean_rg`
+- `p`
+- distribution family
 
 - Higher photon count helps, but it is not the main fix if `PDI` or `PDI2` are consistently biased.
 - If the sanity checker flags `PDI2`, inspect the `Q/lc` integration and tail correction path first.

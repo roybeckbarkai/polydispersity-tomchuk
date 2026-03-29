@@ -16,7 +16,8 @@ from analysis_utils import (
     build_sanity_summary_row,
     build_reconstruction_quality_summary,
     recommend_tomchuk_settings,
-    calculate_sphere_theoretical_parameters,
+    calculate_sphere_input_theoretical_parameters,
+    normalize_simulated_sphere_intensity,
 )
 
 def run():
@@ -142,21 +143,26 @@ def run():
         mask = (q_meas >= q_min) & (q_meas <= q_max)
         q_target = q_meas[mask]
         i_target = i_meas[mask]
+        normalization_scale = 1.0
     else:
         q_target = q_sim
         i_target = i_sim
+        normalization_scale = 1.0
+        if mode_key == 'Sphere' and analysis_method == 'Tomchuk':
+            i_target, normalization_scale = normalize_simulated_sphere_intensity(q_target, i_target, r_vals, pdf_vals)
 
     # Run Analysis
     analysis_res = perform_saxs_analysis(q_target, i_target, dist_type, mean_rg, mode_key, analysis_method, nnls_max_rg)
+    analysis_res['simulation_normalization_scale'] = normalization_scale
     reconstruction_summary = build_reconstruction_quality_summary(analysis_res) if analysis_method == 'Tomchuk' else None
     sanity_summary = None
     theoretical_values = None
     if (not use_experimental) and mode_key == 'Sphere' and analysis_method == 'Tomchuk':
         sanity_summary = build_sanity_summary_row(q_target, i_target, r_vals, pdf_vals, analysis_res)
-        theoretical_values = calculate_sphere_theoretical_parameters(q_target, i_target, r_vals, pdf_vals)
+        theoretical_values = calculate_sphere_input_theoretical_parameters(mean_rg, p_val, dist_type)
 
     # --- Define Input Label EARLY for use in all columns ---
-    input_label = "Ref (Sidebar)" if use_experimental else "Input"
+    input_label = "Ref (Sidebar)" if use_experimental else ("Input (normalized)" if normalization_scale != 1.0 else "Input")
 
     # --- Visualization ---
     col_viz1, col_viz2 = st.columns(2)
@@ -242,8 +248,8 @@ def run():
             rec_label = "NNLS Mean Radius" if mode_key == 'Sphere' else "NNLS Mean Rg"
             st.metric(rec_label, f"{rec_size:.2f} nm", delta=f"{rec_size - input_mean_r:.2f}")
             st.metric("NNLS Width (p)", f"{analysis_res.get('p_rec', 0):.3f}")
-        if 'chi2' in analysis_res:
-            st.metric("Chi-Square (Red.)", f"{analysis_res.get('chi2', 0):.2f}")
+        if 'rrms' in analysis_res:
+            st.metric("Fit RelRMS", f"{analysis_res.get('rrms', 0):.4f}")
 
     with c2:
         st.markdown("**Extracted Values**")
@@ -251,6 +257,7 @@ def run():
             st.metric("Tomchuk Path", analysis_res.get('tomchuk_extraction', 'n/a'))
         val_list = [f"{analysis_res.get('Rg', 0):.2f} nm", f"{analysis_res.get('G', 0):.2e}"]
         theory_list = ["n/a", "n/a"]
+        rel_err_list = ["n/a", "n/a"]
         param_list = ["Rg (Extracted)", "G"]
         if analysis_method == 'Tomchuk':
             val_list.extend([
@@ -261,23 +268,51 @@ def run():
                 f"{analysis_res.get('PDI2', 0):.4f}",
             ])
             theory_list.extend(["n/a", "n/a", "n/a", "n/a", "n/a"])
+            rel_err_list.extend(["n/a", "n/a", "n/a", "n/a", "n/a"])
             param_list.extend(["Q", "lc", "B", "PDI", "PDI2"])
             if theoretical_values is not None:
-                theory_list = [
-                    f"{theoretical_values.get('Rg', 0):.2f} nm",
-                    f"{theoretical_values.get('G', 0):.2e}",
-                    f"{theoretical_values.get('Q', 0):.2e}",
-                    f"{theoretical_values.get('lc', 0):.2f} nm",
-                    f"{theoretical_values.get('B', 0):.2e}",
-                    f"{theoretical_values.get('PDI', 0):.4f}",
-                    f"{theoretical_values.get('PDI2', 0):.4f}",
+                extracted_numeric = [
+                    analysis_res.get('Rg', 0),
+                    analysis_res.get('G', 0),
+                    analysis_res.get('Q', 0),
+                    analysis_res.get('lc', 0),
+                    analysis_res.get('B', 0),
+                    analysis_res.get('PDI', 0),
+                    analysis_res.get('PDI2', 0),
                 ]
-        res_df = pd.DataFrame({"Parameter": param_list, "Extracted": val_list, "Theory": theory_list})
-        st.dataframe(res_df, hide_index=True, width='stretch', height=230)
+                theory_numeric = [
+                    theoretical_values.get('Rg', 0),
+                    theoretical_values.get('G', 0),
+                    theoretical_values.get('Q', 0),
+                    theoretical_values.get('lc', 0),
+                    theoretical_values.get('B', 0),
+                    theoretical_values.get('PDI', 0),
+                    theoretical_values.get('PDI2', 0),
+                ]
+                theory_list = [
+                    f"{theory_numeric[0]:.2f} nm",
+                    f"{theory_numeric[1]:.2e}",
+                    f"{theory_numeric[2]:.2e}",
+                    f"{theory_numeric[3]:.2f} nm",
+                    f"{theory_numeric[4]:.2e}",
+                    f"{theory_numeric[5]:.4f}",
+                    f"{theory_numeric[6]:.4f}",
+                ]
+                rel_err_list = []
+                for extracted_val, theory_val in zip(extracted_numeric, theory_numeric):
+                    if theory_val != 0:
+                        rel_err_list.append(f"{((extracted_val - theory_val) / theory_val):+.2%}")
+                    else:
+                        rel_err_list.append("n/a")
+        res_df = pd.DataFrame({"Parameter": param_list, "Extracted": val_list, "Theory": theory_list, "RelErr": rel_err_list})
+        st.dataframe(res_df, hide_index=True, width='stretch', height=250)
+        if theoretical_values is not None:
+            if normalization_scale != 1.0:
+                st.caption(f"Simulated 1D data was normalized by {normalization_scale:.4e} before Tomchuk analysis so extracted amplitudes can be compared to input-based theory.")
         if reconstruction_summary is not None:
             recon_rows = pd.DataFrame([
-                {"Variant": "PDI", "Chi2": f"{reconstruction_summary['chi2_pdi']:.2f}", "Quality": reconstruction_summary['quality_pdi']},
-                {"Variant": "PDI2", "Chi2": f"{reconstruction_summary['chi2_pdi2']:.2f}", "Quality": reconstruction_summary['quality_pdi2']},
+                {"Variant": "PDI", "RelRMS": f"{reconstruction_summary['rrms_pdi']:.4f}", "Quality": reconstruction_summary['quality_pdi']},
+                {"Variant": "PDI2", "RelRMS": f"{reconstruction_summary['rrms_pdi2']:.4f}", "Quality": reconstruction_summary['quality_pdi2']},
             ])
             st.caption(f"Best reconstructed fit: {reconstruction_summary['best_variant']}")
             st.dataframe(recon_rows, hide_index=True, width='stretch', height=115)
@@ -292,16 +327,6 @@ def run():
         else:
             st.metric("Sanity", "PASS" if sanity_summary.get('Sanity_Pass') else "CHECK")
             st.caption(f"Failures: {sanity_summary.get('Sanity_Failures', 'none')}")
-            sanity_rows = []
-            for key in ['PDI', 'PDI2', 'p_rec_pdi', 'p_rec_pdi2', 'mean_radius_pdi', 'mean_radius_pdi2']:
-                rel_key = f'Sanity_RelErr_{key}'
-                if rel_key in sanity_summary:
-                    sanity_rows.append({
-                        "Metric": key,
-                        "RelErr": f"{sanity_summary[rel_key]:+.2%}",
-                    })
-            if sanity_rows:
-                st.dataframe(pd.DataFrame(sanity_rows), hide_index=True, width='stretch', height=170)
             st.caption(sanity_summary.get('Sanity_Suggestions', ''))
         if recommendation:
             st.markdown("**Recommended q / bins**")
@@ -314,7 +339,7 @@ def run():
                 )
                 st.caption(
                     f"Max abs. p error={best['max_abs_err']:.3f}; "
-                    f"best fit={best['best_variant']} (chi2={best['best_chi2']:.2f})"
+                    f"best fit={best['best_variant']} (RelRMS={best['best_rrms']:.4f})"
                 )
             if safety:
                 st.caption(

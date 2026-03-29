@@ -57,8 +57,8 @@ def run_case(dist_type, p_val, mean_rg, q_max, n_bins, flux, noise, pixels, smea
         "mean_radius_pdi2": res.get("mean_r_rec_pdi2", 0.0),
         "PDI": res.get("PDI", 0.0),
         "PDI2": res.get("PDI2", 0.0),
-        "chi2_pdi": res.get("chi2_pdi", 0.0),
-        "chi2_pdi2": res.get("chi2_pdi2", 0.0),
+        "rrms_pdi": res.get("rrms_pdi", 0.0),
+        "rrms_pdi2": res.get("rrms_pdi2", 0.0),
         "quality_pdi": reconstruction["quality_pdi"],
         "quality_pdi2": reconstruction["quality_pdi2"],
         "best_variant": reconstruction["best_variant"],
@@ -150,7 +150,7 @@ def main():
                         f"q_max={best['q_max']:.3f}, bins={best['n_bins']}, "
                         f"p(PDI)={best['p_pdi']:.4f}, p(PDI2)={best['p_pdi2']:.4f}, "
                         f"max_abs_err={best['max_abs_err']:.4f}, best_variant={best['best_variant']}, "
-                        f"chi2(PDI)={best['chi2_pdi']:.2f}, chi2(PDI2)={best['chi2_pdi2']:.2f}"
+                        f"RelRMS(PDI)={best['rrms_pdi']:.4f}, RelRMS(PDI2)={best['rrms_pdi2']:.4f}"
                     )
                 if safety:
                     print(

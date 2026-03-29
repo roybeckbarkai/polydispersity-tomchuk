@@ -374,8 +374,8 @@ def recover_distribution_nnls(q_exp, i_exp, q_min, q_max, kernel_func, max_rg_ba
     
     return r_basis, weights, pdf_nnls, mean_val, p_rec, i_fit
 
-def calculate_fit_and_chi2(q_exp, i_exp, r_vals, pdf_vals, kernel_func):
-    """ Helper to generate I_fit and Chi2 for a given P(r) """
+def calculate_fit_and_rrms(q_exp, i_exp, r_vals, pdf_vals, kernel_func):
+    """Helper to generate I_fit and relative RMS error for a given P(r)."""
     if len(q_exp) == 0: return np.zeros_like(q_exp), 0
     
     # Normalize PDF
@@ -395,14 +395,11 @@ def calculate_fit_and_chi2(q_exp, i_exp, r_vals, pdf_vals, kernel_func):
     scale = num/den if den > 0 else 1.0
     i_fit = i_calc_shape * scale
 
-    # Chi2
-    sigma = np.sqrt(np.abs(i_exp))
-    sigma[sigma == 0] = 1.0 
-    chi2 = np.sum(((i_exp - i_fit) / sigma)**2)
-    dof = max(1, len(i_exp) - 3)
-    chi2_red = chi2 / dof
-    
-    return i_fit, chi2_red
+    denom = np.maximum(np.abs(i_exp), np.max(np.abs(i_exp)) * 1e-12 if len(i_exp) > 0 else 1.0)
+    rel_residual = (i_exp - i_fit) / denom
+    rrms = np.sqrt(np.mean(rel_residual ** 2))
+
+    return i_fit, float(rrms)
 
 def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, method, max_rg_nnls):
     results = {
@@ -413,7 +410,7 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
         'rg_num_rec_pdi': 0, 'rg_num_rec_pdi2': 0,
         'p_rec': 0, 'rg_num_rec': 0, 'mean_r_rec': 0,
         'I_fit_pdi': [], 'I_fit_pdi2': [], 'I_fit': [], 'I_fit_unified': [],
-        'chi2_pdi': 0, 'chi2_pdi2': 0, 'chi2': 0,
+        'rrms_pdi': 0, 'rrms_pdi2': 0, 'rrms': 0,
         'tomchuk_extraction': 'none',
     }
     
@@ -470,19 +467,19 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             
             # PDI Fit
             pdf_sim_pdi = get_distribution(dist_type, r_sim, mean_r_rec, p_rec_pdi)
-            i_fit_pdi, chi2_pdi = calculate_fit_and_chi2(q_exp, i_exp, r_sim, pdf_sim_pdi, sphere_form_factor)
+            i_fit_pdi, rrms_pdi = calculate_fit_and_rrms(q_exp, i_exp, r_sim, pdf_sim_pdi, sphere_form_factor)
             results['I_fit_pdi'] = i_fit_pdi
-            results['chi2_pdi'] = chi2_pdi
+            results['rrms_pdi'] = rrms_pdi
             
             # PDI2 Fit
             pdf_sim_pdi2 = get_distribution(dist_type, r_sim, mean_r_rec_2, p_rec_pdi2)
-            i_fit_pdi2, chi2_pdi2 = calculate_fit_and_chi2(q_exp, i_exp, r_sim, pdf_sim_pdi2, sphere_form_factor)
+            i_fit_pdi2, rrms_pdi2 = calculate_fit_and_rrms(q_exp, i_exp, r_sim, pdf_sim_pdi2, sphere_form_factor)
             results['I_fit_pdi2'] = i_fit_pdi2
-            results['chi2_pdi2'] = chi2_pdi2
+            results['rrms_pdi2'] = rrms_pdi2
             
             if len(results['I_fit_unified']) != len(q_exp):
                 results['I_fit'] = i_fit_pdi
-            results['chi2'] = chi2_pdi
+            results['rrms'] = rrms_pdi
             
         elif method == 'NNLS':
             r_nnls, w_nnls, pdf_nnls, mean_r_nnls, p_nnls, i_fit_global = recover_distribution_nnls(q_exp, i_exp, q_exp[0], q_exp[-1], sphere_form_factor, max_rg_basis=max_rg_nnls)
@@ -495,10 +492,9 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             results['method'] = 'NNLS'
             results['I_fit'] = i_fit_global
             
-            sigma = np.sqrt(np.abs(i_exp)); sigma[sigma == 0] = 1.0 
-            chi2 = np.sum(((i_exp - i_fit_global) / sigma)**2)
-            dof = max(1, len(i_exp) - 3)
-            results['chi2'] = chi2 / dof
+            denom = np.maximum(np.abs(i_exp), np.max(np.abs(i_exp)) * 1e-12 if len(i_exp) > 0 else 1.0)
+            rel_residual = (i_exp - i_fit_global) / denom
+            results['rrms'] = float(np.sqrt(np.mean(rel_residual ** 2)))
 
     elif mode == 'IDP':
         r_nnls, w_nnls, pdf_nnls, mean_rg_nnls, p_nnls, i_fit_global = recover_distribution_nnls(q_exp, i_exp, q_exp[0], q_exp[-1], debye_form_factor, max_rg_basis=max_rg_nnls)
@@ -510,10 +506,9 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
         results['method'] = 'NNLS'
         results['I_fit'] = i_fit_global
         
-        sigma = np.sqrt(np.abs(i_exp)); sigma[sigma == 0] = 1.0 
-        chi2 = np.sum(((i_exp - i_fit_global) / sigma)**2)
-        dof = max(1, len(i_exp) - 3)
-        results['chi2'] = chi2 / dof
+        denom = np.maximum(np.abs(i_exp), np.max(np.abs(i_exp)) * 1e-12 if len(i_exp) > 0 else 1.0)
+        rel_residual = (i_exp - i_fit_global) / denom
+        results['rrms'] = float(np.sqrt(np.mean(rel_residual ** 2)))
     
     return results
 
@@ -543,16 +538,16 @@ def get_header_string(params, analysis_res):
             f"#   PDI2 (Calculated): {analysis_res.get('PDI2', 0):.6f}",
             f"#   Recovered p (from PDI): {analysis_res.get('p_rec_pdi', 0):.6f}",
             f"#   Recovered Mean Radius (from PDI): {analysis_res.get('mean_r_rec_pdi', 0):.6f} nm",
-            f"#   Fit Chi2 (PDI): {analysis_res.get('chi2_pdi', 0):.4f}",
+            f"#   Fit RelRMS (PDI): {analysis_res.get('rrms_pdi', 0):.6f}",
             f"#   Recovered p (from PDI2): {analysis_res.get('p_rec_pdi2', 0):.6f}",
             f"#   Recovered Mean Radius (from PDI2): {analysis_res.get('mean_r_rec_pdi2', 0):.6f} nm",
-            f"#   Fit Chi2 (PDI2): {analysis_res.get('chi2_pdi2', 0):.4f}",
+            f"#   Fit RelRMS (PDI2): {analysis_res.get('rrms_pdi2', 0):.6f}",
         ])
     else: # NNLS
         header_lines.extend([
             f"#   Recovered Mean Radius: {analysis_res.get('mean_r_rec', 0):.6f} nm" if params['mode'] == 'Sphere' else f"#   Recovered Rg (Mean): {analysis_res.get('rg_num_rec', 0):.6f} nm",
             f"#   Recovered p (Width): {analysis_res.get('p_rec', 0):.6f}",
-            f"#   Fit Chi2: {analysis_res.get('chi2', 0):.4f}"
+            f"#   Fit RelRMS: {analysis_res.get('rrms', 0):.6f}"
         ])
     
     header_lines.append("# ==========================================")
@@ -632,7 +627,7 @@ def build_summary_row(params, analysis_res, base_row=None):
         'Recovered_Size': rec_size,
         'Rel_Err_p': (rec_p - p_true) / p_true if p_true != 0 else 0,
         'Rel_Err_Size': (rec_size - true_size) / true_size if true_size != 0 else 0,
-        'Chi2': analysis_res.get('chi2', 0)
+        'RelRMS': analysis_res.get('rrms', 0)
     })
 
     if params['method'] == 'Tomchuk':
@@ -700,6 +695,45 @@ def calculate_sphere_theoretical_parameters(q_vals, i_vals, r_vals, pdf_vals):
         'PDI2': pdi2_true,
         'I_shape': i_shape * scale,
     }
+
+def calculate_sphere_input_theoretical_parameters(mean_rg, p_val, dist_type):
+    mean_rg = float(mean_rg)
+    p_val = max(float(p_val), 1e-6)
+    mean_radius = mean_rg * np.sqrt(5.0 / 3.0)
+
+    moments = {}
+    for order in (2, 3, 4, 6, 8):
+        moments[order] = (mean_radius ** order) * get_normalized_moment(order, p_val, dist_type)
+
+    rg_true = np.sqrt((3.0 * moments[8]) / (5.0 * moments[6])) if moments[6] > 0 else 0
+    g_true = ((4.0 * np.pi / 3.0) ** 2) * moments[6]
+    b_true = 8.0 * (np.pi ** 2) * moments[2]
+    q_true = (8.0 * (np.pi ** 3) / 3.0) * moments[3]
+    lc_true = 1.5 * moments[4] / moments[3] if moments[3] > 0 else 0
+    pdi_true = (moments[2] * (moments[8] ** 2)) / (moments[6] ** 3) if moments[6] > 0 else 0
+    pdi2_true = (moments[2] * moments[4]) / (moments[3] ** 2) if moments[3] > 0 else 0
+
+    return {
+        'mean_radius': mean_radius,
+        'p_true': p_val,
+        'Rg': rg_true,
+        'G': g_true,
+        'B': b_true,
+        'Q': q_true,
+        'lc': lc_true,
+        'PDI': pdi_true,
+        'PDI2': pdi2_true,
+        'scale_dependent_keys': {'G', 'B', 'Q'},
+    }
+
+def normalize_simulated_sphere_intensity(q_vals, i_vals, r_vals, pdf_vals):
+    if len(q_vals) == 0 or len(i_vals) == 0:
+        return np.asarray(i_vals, dtype=float), 1.0
+    theory_from_data = calculate_sphere_theoretical_parameters(q_vals, i_vals, r_vals, pdf_vals)
+    scale = float(theory_from_data.get('scale', 1.0))
+    if not np.isfinite(scale) or scale <= 0:
+        scale = 1.0
+    return np.asarray(i_vals, dtype=float) / scale, scale
 
 def evaluate_tomchuk_sanity_checks(q_vals, i_vals, r_vals, pdf_vals, analysis_res, rel_tol=0.2):
     expected = calculate_sphere_theoretical_parameters(q_vals, i_vals, r_vals, pdf_vals)
@@ -784,37 +818,37 @@ def build_sanity_summary_row(q_vals, i_vals, r_vals, pdf_vals, analysis_res, rel
         summary_row[f'Sanity_RelErr_{key}'] = value['rel_err']
     return summary_row
 
-def classify_reconstruction_quality(chi2):
-    if not np.isfinite(chi2) or chi2 <= 0:
+def classify_reconstruction_quality(rrms):
+    if not np.isfinite(rrms) or rrms <= 0:
         return "n/a"
-    if chi2 <= 2.0:
+    if rrms <= 0.02:
         return "strong"
-    if chi2 <= 5.0:
+    if rrms <= 0.05:
         return "usable"
-    if chi2 <= 10.0:
+    if rrms <= 0.10:
         return "weak"
     return "poor"
 
 def build_reconstruction_quality_summary(analysis_res):
-    chi2_pdi = float(analysis_res.get('chi2_pdi', 0))
-    chi2_pdi2 = float(analysis_res.get('chi2_pdi2', 0))
+    rrms_pdi = float(analysis_res.get('rrms_pdi', 0))
+    rrms_pdi2 = float(analysis_res.get('rrms_pdi2', 0))
     summary = {
-        'chi2_pdi': chi2_pdi,
-        'chi2_pdi2': chi2_pdi2,
-        'quality_pdi': classify_reconstruction_quality(chi2_pdi),
-        'quality_pdi2': classify_reconstruction_quality(chi2_pdi2),
+        'rrms_pdi': rrms_pdi,
+        'rrms_pdi2': rrms_pdi2,
+        'quality_pdi': classify_reconstruction_quality(rrms_pdi),
+        'quality_pdi2': classify_reconstruction_quality(rrms_pdi2),
         'best_variant': 'n/a',
-        'best_chi2': 0.0,
+        'best_rrms': 0.0,
     }
     candidates = []
-    if chi2_pdi > 0:
-        candidates.append(('PDI', chi2_pdi))
-    if chi2_pdi2 > 0:
-        candidates.append(('PDI2', chi2_pdi2))
+    if rrms_pdi > 0:
+        candidates.append(('PDI', rrms_pdi))
+    if rrms_pdi2 > 0:
+        candidates.append(('PDI2', rrms_pdi2))
     if candidates:
-        best_variant, best_chi2 = min(candidates, key=lambda item: item[1])
+        best_variant, best_rrms = min(candidates, key=lambda item: item[1])
         summary['best_variant'] = best_variant
-        summary['best_chi2'] = best_chi2
+        summary['best_rrms'] = best_rrms
     return summary
 
 def recommend_tomchuk_settings(
@@ -877,12 +911,12 @@ def recommend_tomchuk_settings(
                 'sum_abs_err': abs_err_pdi + abs_err_pdi2,
                 'rel_err_pdi': float(summary.get('Rel_Err_p', 0)),
                 'rel_err_pdi2': float(summary.get('Rel_Err_p_PDI2', 0)),
-                'chi2_pdi': reconstruction['chi2_pdi'],
-                'chi2_pdi2': reconstruction['chi2_pdi2'],
+                'rrms_pdi': reconstruction['rrms_pdi'],
+                'rrms_pdi2': reconstruction['rrms_pdi2'],
                 'quality_pdi': reconstruction['quality_pdi'],
                 'quality_pdi2': reconstruction['quality_pdi2'],
                 'best_variant': reconstruction['best_variant'],
-                'best_chi2': reconstruction['best_chi2'],
+                'best_rrms': reconstruction['best_rrms'],
                 'sanity_pass': bool(sanity_summary.get('Sanity_Pass', False)),
                 'sanity_failures': sanity_summary.get('Sanity_Failures', 'none'),
                 'tomchuk_extraction': analysis_res.get('tomchuk_extraction', 'none'),
@@ -899,7 +933,7 @@ def recommend_tomchuk_settings(
             'target_abs_error': target_abs_error,
         }
 
-    rows = sorted(rows, key=lambda row: (row['max_abs_err'], row['sum_abs_err'], row['best_chi2'], row['q_max'], row['n_bins']))
+    rows = sorted(rows, key=lambda row: (row['max_abs_err'], row['sum_abs_err'], row['best_rrms'], row['q_max'], row['n_bins']))
     best = rows[0]
     passing_rows = [row for row in rows if row['meets_target']]
     safety_rows = [
@@ -927,14 +961,20 @@ def recommend_tomchuk_settings(
 
 def run_simulation_analysis_case(params):
     q_sim, i_sim, _, r_vals, pdf_vals = run_simulation_core(params)
+    i_for_analysis = i_sim
+    if params['mode'] == 'Sphere' and params.get('normalize_simulated', True):
+        i_for_analysis, norm_scale = normalize_simulated_sphere_intensity(q_sim, i_sim, r_vals, pdf_vals)
+    else:
+        norm_scale = 1.0
     analysis_res = perform_saxs_analysis(
         q_sim,
-        i_sim,
+        i_for_analysis,
         params['dist_type'],
         params['mean_rg'],
         params['mode'],
         params['method'],
         params['nnls_max_rg']
     )
+    analysis_res['simulation_normalization_scale'] = norm_scale
     recovered_dists = build_recovered_distributions(params, analysis_res, r_vals)
-    return q_sim, i_sim, r_vals, pdf_vals, analysis_res, recovered_dists
+    return q_sim, i_for_analysis, r_vals, pdf_vals, analysis_res, recovered_dists
