@@ -158,16 +158,16 @@ def run():
                     
                     rec_dists = {}
                     if params['method'] == 'Tomchuk':
-                         m_pdi = res.get('rg_num_rec_pdi', params['mean_rg']) * np.sqrt(5.0/3.0)
-                         if m_pdi > 0:
-                             rec_dists['pdi'] = get_distribution(params['dist_type'], r_vals, m_pdi, res.get('p_rec_pdi', 0))
+                         mean_r_pdi = res.get('mean_r_rec_pdi', params['mean_rg'] * np.sqrt(5.0 / 3.0))
+                         if mean_r_pdi > 0:
+                             rec_dists['pdi'] = get_distribution(params['dist_type'], r_vals, mean_r_pdi, res.get('p_rec_pdi', 0))
                          
-                         m_pdi2 = res.get('rg_num_rec_pdi2', params['mean_rg']) * np.sqrt(5.0/3.0)
-                         if m_pdi2 > 0:
-                             rec_dists['pdi2'] = get_distribution(params['dist_type'], r_vals, m_pdi2, res.get('p_rec_pdi2', 0))
+                         mean_r_pdi2 = res.get('mean_r_rec_pdi2', params['mean_rg'] * np.sqrt(5.0 / 3.0))
+                         if mean_r_pdi2 > 0:
+                             rec_dists['pdi2'] = get_distribution(params['dist_type'], r_vals, mean_r_pdi2, res.get('p_rec_pdi2', 0))
                     elif 'nnls_r' in res:
                          rec_dists['nnls_r'] = res['nnls_r']
-                         rec_dists['nnls_w'] = res['nnls_w']
+                         rec_dists['nnls_pdf'] = res.get('nnls_pdf', res['nnls_w'])
 
                     header = get_header_string(params, res)
                     intensity_csv = create_intensity_csv(header, q_sim, i_sim, res, params['method'])
@@ -179,33 +179,37 @@ def run():
                     summary_row = row_dict.copy()
                     
                     rec_p = res.get('p_rec', 0) if params['method'] == 'NNLS' else res.get('p_rec_pdi', 0)
-                    rec_rg = res.get('rg_num_rec', 0) if params['method'] == 'NNLS' else res.get('rg_num_rec_pdi', 0)
+                    if params['mode'] == 'Sphere':
+                        true_size = params['mean_rg'] * np.sqrt(5.0 / 3.0)
+                        rec_size = res.get('mean_r_rec', 0) if params['method'] == 'NNLS' else res.get('mean_r_rec_pdi', 0)
+                    else:
+                        true_size = params['mean_rg']
+                        rec_size = res.get('rg_num_rec', 0) if params['method'] == 'NNLS' else res.get('Rg', 0)
                     
                     rec_p_2 = res.get('p_rec_pdi2', 0) if params['method'] == 'Tomchuk' else 0
-                    rec_rg_2 = res.get('rg_num_rec_pdi2', 0) if params['method'] == 'Tomchuk' else 0
+                    rec_size_2 = res.get('mean_r_rec_pdi2', 0) if params['method'] == 'Tomchuk' and params['mode'] == 'Sphere' else 0
 
                     p_true = params['p_val']
-                    rg_true = params['mean_rg']
                     
                     err_p = (rec_p - p_true)/p_true if p_true != 0 else 0
-                    err_rg = (rec_rg - rg_true)/rg_true if rg_true != 0 else 0
+                    err_size = (rec_size - true_size)/true_size if true_size != 0 else 0
 
                     summary_row.update({
                         'Recovered_p': rec_p,
-                        'Recovered_Rg': rec_rg,
+                        'Recovered_Size': rec_size,
                         'Rel_Err_p': err_p,
-                        'Rel_Err_Rg': err_rg,
+                        'Rel_Err_Size': err_size,
                         'Chi2': res.get('chi2', 0)
                     })
                     
                     if params['method'] == 'Tomchuk':
                         err_p2 = (rec_p_2 - p_true)/p_true if p_true != 0 else 0
-                        err_rg2 = (rec_rg_2 - rg_true)/rg_true if rg_true != 0 else 0
+                        err_size2 = (rec_size_2 - true_size)/true_size if true_size != 0 else 0
                         summary_row.update({
                              'Recovered_p_PDI2': rec_p_2,
-                             'Recovered_Rg_PDI2': rec_rg_2,
+                             'Recovered_Size_PDI2': rec_size_2,
                              'Rel_Err_p_PDI2': err_p2,
-                             'Rel_Err_Rg_PDI2': err_rg2,
+                             'Rel_Err_Size_PDI2': err_size2,
                         })
 
                     summary_results.append(summary_row)
@@ -227,8 +231,8 @@ def run():
             for col in res_df.columns:
                 res_df[col] = pd.to_numeric(res_df[col], errors='ignore')
             
-            result_cols = ['Recovered_p', 'Recovered_Rg', 'Rel_Err_p', 'Rel_Err_Rg', 'Chi2', 
-                           'Recovered_p_PDI2', 'Recovered_Rg_PDI2', 'Rel_Err_p_PDI2', 'Rel_Err_Rg_PDI2']
+            result_cols = ['Recovered_p', 'Recovered_Size', 'Rel_Err_p', 'Rel_Err_Size', 'Chi2', 
+                           'Recovered_p_PDI2', 'Recovered_Size_PDI2', 'Rel_Err_p_PDI2', 'Rel_Err_Size_PDI2']
             varying_cols = [c for c in res_df.columns if res_df[c].nunique() > 1 and c not in result_cols]
             
             if varying_cols:
@@ -236,17 +240,17 @@ def run():
             else:
                 x_axis = res_df.columns[0]
 
-            tab1, tab2 = st.tabs(["Rg Recovery Error", "Polydispersity (p) Error"])
+            tab1, tab2 = st.tabs(["Size Recovery Error", "Polydispersity (p) Error"])
             
             with tab1:
                 try:
-                    fig_rg = px.scatter(res_df, x=x_axis, y="Rel_Err_Rg", 
+                    fig_rg = px.scatter(res_df, x=x_axis, y="Rel_Err_Size", 
                                         color="method (T/N)", hover_data=["mean_rg", "p_val", "smearing"],
-                                        title=f"Relative Error in Rg vs {x_axis}")
+                                        title=f"Relative Error in Recovered Size vs {x_axis}")
                     fig_rg.add_hline(y=0, line_dash="dash", line_color="gray")
                     st.plotly_chart(fig_rg) 
                 except Exception as e:
-                    st.warning(f"Could not plot Rg error: {e}")
+                    st.warning(f"Could not plot size error: {e}")
                 
             with tab2:
                 try:

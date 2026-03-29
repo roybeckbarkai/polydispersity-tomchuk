@@ -2,12 +2,17 @@
 # Last Updated: Tuesday, February 10, 2026
 # Description: Utilities for parsing data, performing Tomchuk analysis, and NNLS distribution recovery.
 
+import math
 import numpy as np
-from scipy.optimize import bisect, nnls
+from scipy.optimize import bisect, least_squares, nnls
 from scipy.integrate import trapezoid
 from scipy.ndimage import gaussian_filter
+from scipy.special import erf, gammaln
 import pandas as pd
 from sim_utils import nCr, double_factorial, sphere_form_factor, debye_form_factor, get_distribution
+
+TOMCHUK_C1 = 0.771965
+TOMCHUK_C2 = 0.319739
 
 def parse_saxs_file(uploaded_file):
     try:
@@ -58,10 +63,33 @@ def get_normalized_moment(k, p, dist_type):
         return total
     elif dist_type == 'Schulz':
         z = (1.0 / p**2) - 1.0
-        if z <= 0: return 1.0
-        product = 1.0
-        for i in range(1, k + 1): product *= (z + i)
-        return product / ((z + 1.0)**k)
+        if z <= -1.0:
+            return 1.0
+        try:
+            log_val = gammaln(z + k + 1.0) - gammaln(z + 1.0) - (k * np.log(z + 1.0))
+            return float(np.exp(log_val))
+        except Exception:
+            return 1.0
+    elif dist_type == 'Boltzmann':
+        total = 0.0
+        limit = k // 2
+        for j in range(limit + 1):
+            total += nCr(k, 2 * j) * math.factorial(2 * j) * (p ** (2 * j)) / (2.0 ** j)
+        return total
+    elif dist_type == 'Triangular':
+        a = np.sqrt(6.0) * p
+        if a <= 1e-8:
+            return 1.0
+        num = ((1.0 + a) ** (k + 2)) + ((1.0 - a) ** (k + 2)) - 2.0
+        den = (a ** 2) * (k + 1) * (k + 2)
+        return num / den
+    elif dist_type == 'Uniform':
+        a = np.sqrt(3.0) * p
+        if a <= 1e-8:
+            return 1.0
+        num = ((1.0 + a) ** (k + 1)) - ((1.0 - a) ** (k + 1))
+        den = 2.0 * a * (k + 1)
+        return num / den
     return 1.0 
 
 def calculate_indices_from_p(p, dist_type):
@@ -87,14 +115,86 @@ def solve_p_tomchuk(target_val, index_type, dist_type):
         return bisect(func, 0.001, 6.0, xtol=1e-4)
     except: return 0.0
 
-def get_calculated_mean_rg_num(rg_scat, p, dist_type):
+def get_calculated_mean_radius(rg_scat, p, dist_type):
     if not rg_scat or rg_scat <= 0: return 0
-    if p <= 0: return rg_scat
+    if p <= 0: return np.sqrt(5.0 / 3.0) * rg_scat
     m6 = get_normalized_moment(6, p, dist_type)
     m8 = get_normalized_moment(8, p, dist_type)
-    if m6 <= 0: return 0
+    if m6 <= 0 or m8 <= 0: return 0
     ratio = np.sqrt(m8 / m6)
-    return rg_scat / ratio
+    return np.sqrt(5.0 / 3.0) * rg_scat / ratio
+
+def get_calculated_mean_rg_num(rg_scat, p, dist_type):
+    return get_calculated_mean_radius(rg_scat, p, dist_type)
+
+def mean_radius_to_mean_rg(mean_radius):
+    if not mean_radius or mean_radius <= 0:
+        return 0
+    return mean_radius * np.sqrt(3.0 / 5.0)
+
+def unified_beaucage_intensity(q, G, Rg, B):
+    q = np.asarray(q, dtype=float)
+    q_safe = np.maximum(q, 1e-12)
+    erf_term = erf(q_safe * Rg / np.sqrt(6.0))
+    porod = B * (q_safe ** -4.0) * (erf_term ** 12)
+    return G * np.exp(-(q_safe ** 2) * (Rg ** 2) / 3.0) + porod
+
+def fit_unified_beaucage(q_exp, i_exp, rg_init, g_init):
+    if len(q_exp) < 5:
+        return None
+
+    q_fit = np.asarray(q_exp, dtype=float)
+    i_fit = np.asarray(i_exp, dtype=float)
+    valid = (q_fit > 0) & np.isfinite(q_fit) & np.isfinite(i_fit) & (i_fit > 0)
+    q_fit = q_fit[valid]
+    i_fit = i_fit[valid]
+    if len(q_fit) < 5:
+        return None
+
+    n_tail = max(5, min(20, len(q_fit) // 4))
+    b_init = np.median(i_fit[-n_tail:] * (q_fit[-n_tail:] ** 4))
+    if not np.isfinite(b_init) or b_init <= 0:
+        b_init = np.max(i_fit) * max(q_fit[-1], 1e-3) ** 4
+
+    g0 = max(float(g_init), np.max(i_fit), 1e-12)
+    rg0 = max(float(rg_init), 1e-3)
+    b0 = max(float(b_init), 1e-12)
+
+    def residuals(log_params):
+        g_fit, rg_fit, b_fit = np.exp(log_params)
+        i_model = unified_beaucage_intensity(q_fit, g_fit, rg_fit, b_fit)
+        return np.log(np.maximum(i_model, 1e-300)) - np.log(np.maximum(i_fit, 1e-300))
+
+    best = None
+    best_cost = np.inf
+    lower = np.log([1e-30, max(rg0 * 0.2, 1e-6), 1e-30])
+    upper = np.log([1e30, max(rg0 * 4.0, 1.0), 1e30])
+    for rg_scale in (0.5, 1.0, 1.5):
+        for b_scale in (0.25, 1.0, 4.0):
+            p0 = np.log([g0, max(rg0 * rg_scale, 1e-3), max(b0 * b_scale, 1e-12)])
+            try:
+                fit = least_squares(
+                    residuals,
+                    p0,
+                    bounds=(lower, upper),
+                    loss='soft_l1',
+                    max_nfev=30000,
+                )
+                if fit.success and fit.cost < best_cost:
+                    best = np.exp(fit.x)
+                    best_cost = fit.cost
+            except Exception:
+                continue
+
+    if best is None:
+        return None
+
+    return {
+        'G': float(best[0]),
+        'Rg': float(best[1]),
+        'B': float(best[2]),
+        'I_fit': unified_beaucage_intensity(q_exp, *best),
+    }
 
 def recover_distribution_nnls(q_exp, i_exp, q_min, q_max, kernel_func, max_rg_basis):
     if q_min <= 0: q_min_eff = 1e-3
@@ -160,10 +260,11 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
     results = {
         'Rg': 0, 'G': 0, 'B': 0, 'Q': 0, 'lc': 0, 
         'PDI': 0, 'PDI2': 0, 
-        'p_rec_pdi': 0, 'p_rec_pdi2': 0, 
+        'p_rec_pdi': 0, 'p_rec_pdi2': 0,
+        'mean_r_rec_pdi': 0, 'mean_r_rec_pdi2': 0,
         'rg_num_rec_pdi': 0, 'rg_num_rec_pdi2': 0,
-        'p_rec': 0, 'rg_num_rec': 0,
-        'I_fit_pdi': [], 'I_fit_pdi2': [], 'I_fit': [],
+        'p_rec': 0, 'rg_num_rec': 0, 'mean_r_rec': 0,
+        'I_fit_pdi': [], 'I_fit_pdi2': [], 'I_fit': [], 'I_fit_unified': [],
         'chi2_pdi': 0, 'chi2_pdi2': 0, 'chi2': 0
     }
     
@@ -190,7 +291,7 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
     valid_fit = False
 
     for _ in range(5): 
-        limit = 1.0 if mode == 'IDP' else 1.3
+        limit = 1.0 if mode == 'IDP' else 0.9
         mask = (q_exp * rg_fit) < limit
         mask = mask & (q_exp > 0) & (i_exp > 0)
         if np.sum(mask) < 4: break
@@ -214,36 +315,44 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
 
     if mode == 'Sphere':
         if method == 'Tomchuk':
-            n_fit_b = min(20, len(q_exp)//4)
+            fit_res = fit_unified_beaucage(q_exp, i_exp, rg_fit, g_fit)
+            if fit_res:
+                results['I_fit_unified'] = fit_res['I_fit']
+            n_fit_b = max(8, min(40, len(q_exp) // 6))
             B_est = 0
             if n_fit_b > 0:
                 b_region_i = i_exp[-n_fit_b:]
                 b_region_q = q_exp[-n_fit_b:]
-                B_est = np.mean(b_region_i * (b_region_q**4))
+                B_est = np.median(b_region_i * (b_region_q ** 4))
+                if not np.isfinite(B_est) or B_est < 0:
+                    B_est = 0
 
-            q_max_meas = q_exp[-1] if len(q_exp) > 0 else 0
-            integrand_q = (q_exp**2) * i_exp
-            Q_obs = trapezoid(integrand_q, q_exp)
-            Q_tail = B_est / q_max_meas if q_max_meas > 0 else 0
-            Q = Q_obs + Q_tail
-            integrand_lc = q_exp * i_exp
-            lin_obs = trapezoid(integrand_lc, q_exp)
-            lin_tail = B_est / (2 * q_max_meas**2) if q_max_meas > 0 else 0
-            lc = (np.pi / Q) * (lin_obs + lin_tail) if Q > 0 else 0
-            
+            Q = 0
+            lc = 0
+            if valid_fit and rg_fit > 0:
+                q_max_meas = q_exp[-1] if len(q_exp) > 0 else 0
+                integrand_q = (q_exp ** 2) * i_exp
+                Q_obs = trapezoid(integrand_q, q_exp)
+                Q_tail = B_est / q_max_meas if q_max_meas > 0 else 0
+                Q = Q_obs + Q_tail
+
+                integrand_lc = q_exp * i_exp
+                lin_obs = trapezoid(integrand_lc, q_exp)
+                lin_tail = B_est / (2 * q_max_meas ** 2) if q_max_meas > 0 else 0
+                lc = (np.pi / Q) * (lin_obs + lin_tail) if Q > 0 else 0
+
             pdi_val = 0
             if valid_fit and g_fit > 0:
                 pdi_val = (50.0/81.0) * (B_est * (rg_fit**4)) / g_fit
             pdi2_val = 0
-            if Q > 0:
+            if Q > 0 and lc > 0:
                 pdi2_val = (2 * np.pi / 9) * (B_est * lc) / Q
                 
             p_rec_pdi = solve_p_tomchuk(pdi_val, 'PDI', dist_type)
             p_rec_pdi2 = solve_p_tomchuk(pdi2_val, 'PDI2', dist_type)
             
-            # Rg Recovery
-            rg_num_rec = get_calculated_mean_rg_num(rg_fit, p_rec_pdi, dist_type)
-            rg_num_rec_2 = get_calculated_mean_rg_num(rg_fit, p_rec_pdi2, dist_type)
+            mean_r_rec = get_calculated_mean_radius(rg_fit, p_rec_pdi, dist_type)
+            mean_r_rec_2 = get_calculated_mean_radius(rg_fit, p_rec_pdi2, dist_type)
 
             results['Q'] = Q
             results['lc'] = lc
@@ -252,34 +361,40 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             results['PDI2'] = pdi2_val
             results['p_rec_pdi'] = p_rec_pdi
             results['p_rec_pdi2'] = p_rec_pdi2
-            results['rg_num_rec_pdi'] = rg_num_rec
-            results['rg_num_rec_pdi2'] = rg_num_rec_2
+            results['mean_r_rec_pdi'] = mean_r_rec
+            results['mean_r_rec_pdi2'] = mean_r_rec_2
+            results['rg_num_rec_pdi'] = mean_radius_to_mean_rg(mean_r_rec)
+            results['rg_num_rec_pdi2'] = mean_radius_to_mean_rg(mean_r_rec_2)
             results['method'] = 'Tomchuk'
             
             # --- Reconstruct Fits for PDI and PDI2 ---
-            r_sim = np.linspace(max(0.1, rg_num_rec*0.1), rg_num_rec*5, 200)
+            max_rec_r = max(mean_r_rec, mean_r_rec_2, 0)
+            r_sim = np.linspace(max(0.1, max_rec_r * 0.1), max(max_rec_r * 5, 1.0), 200)
             
             # PDI Fit
-            pdf_sim_pdi = get_distribution(dist_type, r_sim, rg_num_rec*np.sqrt(5/3), p_rec_pdi)
+            pdf_sim_pdi = get_distribution(dist_type, r_sim, mean_r_rec, p_rec_pdi)
             i_fit_pdi, chi2_pdi = calculate_fit_and_chi2(q_exp, i_exp, r_sim, pdf_sim_pdi, sphere_form_factor)
             results['I_fit_pdi'] = i_fit_pdi
             results['chi2_pdi'] = chi2_pdi
             
             # PDI2 Fit
-            pdf_sim_pdi2 = get_distribution(dist_type, r_sim, rg_num_rec_2*np.sqrt(5/3), p_rec_pdi2)
+            pdf_sim_pdi2 = get_distribution(dist_type, r_sim, mean_r_rec_2, p_rec_pdi2)
             i_fit_pdi2, chi2_pdi2 = calculate_fit_and_chi2(q_exp, i_exp, r_sim, pdf_sim_pdi2, sphere_form_factor)
             results['I_fit_pdi2'] = i_fit_pdi2
             results['chi2_pdi2'] = chi2_pdi2
             
-            results['I_fit'] = i_fit_pdi
+            if len(results['I_fit_unified']) != len(q_exp):
+                results['I_fit'] = i_fit_pdi
             results['chi2'] = chi2_pdi
             
         elif method == 'NNLS':
             r_nnls, w_nnls, pdf_nnls, mean_r_nnls, p_nnls, i_fit_global = recover_distribution_nnls(q_exp, i_exp, q_exp[0], q_exp[-1], sphere_form_factor, max_rg_basis=max_rg_nnls)
             results['rg_num_rec'] = mean_r_nnls * np.sqrt(3.0/5.0)
+            results['mean_r_rec'] = mean_r_nnls
             results['p_rec'] = p_nnls
             results['nnls_r'] = r_nnls
             results['nnls_w'] = w_nnls
+            results['nnls_pdf'] = pdf_nnls
             results['method'] = 'NNLS'
             results['I_fit'] = i_fit_global
             
@@ -294,6 +409,7 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
         results['rg_num_rec'] = mean_rg_nnls
         results['nnls_r'] = r_nnls
         results['nnls_w'] = w_nnls
+        results['nnls_pdf'] = pdf_nnls
         results['method'] = 'NNLS'
         results['I_fit'] = i_fit_global
         
@@ -312,6 +428,7 @@ def get_header_string(params, analysis_res):
         "# ==========================================",
         "# Input/Reference Parameters:",
         f"#   Mean Rg: {float(params['mean_rg']):.4f} nm",
+        f"#   Mean Radius: {float(params['mean_rg']) * np.sqrt(5.0/3.0):.4f} nm" if params['mode'] == 'Sphere' else f"#   Mean Radius: n/a",
         f"#   Polydispersity (p): {float(params['p_val']):.4f}",
         f"#   Distribution Type: {params['dist_type']}",
         "#",
@@ -327,15 +444,15 @@ def get_header_string(params, analysis_res):
             f"#   PDI (Calculated): {analysis_res.get('PDI', 0):.6f}",
             f"#   PDI2 (Calculated): {analysis_res.get('PDI2', 0):.6f}",
             f"#   Recovered p (from PDI): {analysis_res.get('p_rec_pdi', 0):.6f}",
-            f"#   Recovered Mean Rg (from PDI): {analysis_res.get('rg_num_rec_pdi', 0):.6f} nm",
+            f"#   Recovered Mean Radius (from PDI): {analysis_res.get('mean_r_rec_pdi', 0):.6f} nm",
             f"#   Fit Chi2 (PDI): {analysis_res.get('chi2_pdi', 0):.4f}",
             f"#   Recovered p (from PDI2): {analysis_res.get('p_rec_pdi2', 0):.6f}",
-            f"#   Recovered Mean Rg (from PDI2): {analysis_res.get('rg_num_rec_pdi2', 0):.6f} nm",
+            f"#   Recovered Mean Radius (from PDI2): {analysis_res.get('mean_r_rec_pdi2', 0):.6f} nm",
             f"#   Fit Chi2 (PDI2): {analysis_res.get('chi2_pdi2', 0):.4f}",
         ])
     else: # NNLS
         header_lines.extend([
-            f"#   Recovered Rg (Mean): {analysis_res.get('rg_num_rec', 0):.6f} nm",
+            f"#   Recovered Mean Radius: {analysis_res.get('mean_r_rec', 0):.6f} nm" if params['mode'] == 'Sphere' else f"#   Recovered Rg (Mean): {analysis_res.get('rg_num_rec', 0):.6f} nm",
             f"#   Recovered p (Width): {analysis_res.get('p_rec', 0):.6f}",
             f"#   Fit Chi2: {analysis_res.get('chi2', 0):.4f}"
         ])
@@ -369,7 +486,7 @@ def create_distribution_csv(header, r, input_dist, recovered_dists, params):
         if 'pdi2' in recovered_dists:
             df['PDI2_Recovered_PDF'] = recovered_dists['pdi2']
     else: 
-        if 'nnls_r' in recovered_dists:
-             df['NNLS_Recovered_PDF'] = np.interp(r, recovered_dists['nnls_r'], recovered_dists['nnls_w'], left=0, right=0)
+        if 'nnls_r' in recovered_dists and 'nnls_pdf' in recovered_dists:
+             df['NNLS_Recovered_PDF'] = np.interp(r, recovered_dists['nnls_r'], recovered_dists['nnls_pdf'], left=0, right=0)
              
     return header + df.to_csv(index=False)

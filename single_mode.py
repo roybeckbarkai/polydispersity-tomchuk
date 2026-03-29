@@ -63,6 +63,8 @@ def run():
     p_val = st.sidebar.number_input("Polydispersity (p)", value= 0.3, min_value=0.01, max_value=6.0, step=0.01, key='p_val', on_change=update_q_max_and_basis)
     dist_label = "Distribution Type" if mode_key == 'Sphere' else "Conformational Distribution"
     dist_type = st.sidebar.selectbox(dist_label, ['Gaussian', 'Lognormal', 'Schulz', 'Boltzmann', 'Triangular', 'Uniform'], key='dist_type')
+    if mode_key == 'Sphere' and analysis_method == 'Tomchuk' and p_val < 0.25:
+        st.sidebar.warning("Tomchuk analysis is intended for highly polydisperse spheres; results below p = 0.25 may be unreliable.")
 
     st.sidebar.header("NNLS Settings")
     nnls_max_rg = st.sidebar.number_input("Max Rg (Basis Set)", min_value=1.0, max_value=500.0, step=1.0, key='nnls_max_rg')
@@ -182,11 +184,14 @@ def run():
         st.metric(input_label + " Rg", f"{mean_rg:.2f} nm")
         if analysis_method == 'Tomchuk':
             st.metric("Rec. p (PDI)", f"{analysis_res.get('p_rec_pdi', 0):.3f}")
-            st.metric("Rec. Rg (PDI)", f"{analysis_res.get('rg_num_rec_pdi', 0):.2f} nm")
+            st.metric("Rec. Mean Radius (PDI)", f"{analysis_res.get('mean_r_rec_pdi', 0):.2f} nm")
             st.metric("Rec. p (PDI₂)", f"{analysis_res.get('p_rec_pdi2', 0):.3f}")
-            st.metric("Rec. Rg (PDI₂)", f"{analysis_res.get('rg_num_rec_pdi2', 0):.2f} nm")
+            st.metric("Rec. Mean Radius (PDI₂)", f"{analysis_res.get('mean_r_rec_pdi2', 0):.2f} nm")
         else:
-            st.metric("NNLS Mean Rg", f"{analysis_res.get('rg_num_rec', 0):.2f} nm", delta=f"{analysis_res.get('rg_num_rec', 0) - mean_rg:.2f}")
+            input_mean_r = mean_rg * np.sqrt(5.0 / 3.0) if mode_key == 'Sphere' else mean_rg
+            rec_size = analysis_res.get('mean_r_rec', 0) if mode_key == 'Sphere' else analysis_res.get('rg_num_rec', 0)
+            rec_label = "NNLS Mean Radius" if mode_key == 'Sphere' else "NNLS Mean Rg"
+            st.metric(rec_label, f"{rec_size:.2f} nm", delta=f"{rec_size - input_mean_r:.2f}")
             st.metric("NNLS Width (p)", f"{analysis_res.get('p_rec', 0):.3f}")
         if 'chi2' in analysis_res:
             st.metric("Chi-Square (Red.)", f"{analysis_res.get('chi2', 0):.2f}")
@@ -209,22 +214,22 @@ def run():
         
         rec_dists_dl = {}
         if analysis_method == 'Tomchuk':
-            m_r_pdi = analysis_res.get('rg_num_rec_pdi', 0) * np.sqrt(5.0/3.0)
-            if m_r_pdi > 0:
-                pdf_rec_pdi = get_distribution(dist_type, r_vals, m_r_pdi, analysis_res.get('p_rec_pdi', 0))
+            mean_r_pdi = analysis_res.get('mean_r_rec_pdi', 0)
+            if mean_r_pdi > 0:
+                pdf_rec_pdi = get_distribution(dist_type, r_vals, mean_r_pdi, analysis_res.get('p_rec_pdi', 0))
                 fig_dist.add_trace(go.Scatter(x=r_vals, y=pdf_rec_pdi, mode='lines', name='PDI Rec.', line=dict(color='blue')))
                 rec_dists_dl['pdi'] = pdf_rec_pdi
             
-            m_r_pdi2 = analysis_res.get('rg_num_rec_pdi2', 0) * np.sqrt(5.0/3.0)
-            if m_r_pdi2 > 0:
-                pdf_rec_pdi2 = get_distribution(dist_type, r_vals, m_r_pdi2, analysis_res.get('p_rec_pdi2', 0))
+            mean_r_pdi2 = analysis_res.get('mean_r_rec_pdi2', 0)
+            if mean_r_pdi2 > 0:
+                pdf_rec_pdi2 = get_distribution(dist_type, r_vals, mean_r_pdi2, analysis_res.get('p_rec_pdi2', 0))
                 fig_dist.add_trace(go.Scatter(x=r_vals, y=pdf_rec_pdi2, mode='lines', name='PDI2 Rec.', line=dict(color='purple')))
                 rec_dists_dl['pdi2'] = pdf_rec_pdi2
         else:
             if 'nnls_r' in analysis_res:
-                fig_dist.add_trace(go.Scatter(x=analysis_res['nnls_r'], y=analysis_res['nnls_w'], mode='none', fill='tozeroy', name='NNLS Rec.', fillcolor='rgba(255, 165, 0, 0.5)', line=dict(color='orange')))
+                fig_dist.add_trace(go.Scatter(x=analysis_res['nnls_r'], y=analysis_res.get('nnls_pdf', analysis_res['nnls_w']), mode='none', fill='tozeroy', name='NNLS Rec.', fillcolor='rgba(255, 165, 0, 0.5)', line=dict(color='orange')))
                 rec_dists_dl['nnls_r'] = analysis_res['nnls_r']
-                rec_dists_dl['nnls_w'] = analysis_res['nnls_w']
+                rec_dists_dl['nnls_pdf'] = analysis_res.get('nnls_pdf', analysis_res['nnls_w'])
         
         fig_dist.update_layout(xaxis_title="Radius (nm)", yaxis_title="Prob", width=400, height=350, margin=dict(l=40,r=40,t=20,b=40))
         st.plotly_chart(fig_dist)
