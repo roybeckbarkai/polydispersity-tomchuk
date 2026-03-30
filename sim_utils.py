@@ -106,6 +106,49 @@ def debye_form_factor(q, rg):
     val = np.nan_to_num(val, nan=1.0)
     return val
 
+
+def build_detector_q_grid(pixels, q_max):
+    q_axis = np.linspace(-q_max, q_max, pixels)
+    qx, qy = np.meshgrid(q_axis, q_axis)
+    q_r = np.sqrt(qx**2 + qy**2)
+    return q_axis, qx, qy, q_r
+
+
+def radial_average_detector_image(i_2d, q_r, q_min, q_max, n_bins, binning_mode):
+    """Shared 2D->1D reduction used by the simulator and Tenor-SAXS."""
+    i_2d = np.asarray(i_2d, dtype=float)
+    q_r = np.asarray(q_r, dtype=float)
+
+    if binning_mode == "Linear" or binning_mode == "Lin":
+        bin_width = (q_max - q_min) / n_bins
+        if bin_width <= 0:
+            bin_width = q_max / n_bins
+        r_indices = ((q_r - q_min) / bin_width).astype(int).ravel()
+        valid_mask = (r_indices >= 0) & (r_indices < n_bins) & (q_r.ravel() <= q_max)
+        tbin = np.bincount(r_indices[valid_mask], weights=i_2d.ravel()[valid_mask], minlength=n_bins)
+        nr = np.bincount(r_indices[valid_mask], minlength=n_bins)
+        radial_prof = np.zeros(n_bins)
+        nonzero = nr > 0
+        radial_prof[nonzero] = tbin[nonzero] / nr[nonzero]
+        q_1d = q_min + (np.arange(n_bins) + 0.5) * bin_width
+    else:
+        q_min_log = max(q_min, 1e-4)
+        edges = np.logspace(np.log10(q_min_log), np.log10(q_max), n_bins + 1)
+        r_vals_flat = q_r.ravel()
+        i_vals_flat = i_2d.ravel()
+        inds = np.digitize(r_vals_flat, edges)
+        valid_mask = (inds >= 1) & (inds <= n_bins)
+        valid_inds = inds[valid_mask] - 1
+        tbin = np.bincount(valid_inds, weights=i_vals_flat[valid_mask], minlength=n_bins)
+        nr = np.bincount(valid_inds, minlength=n_bins)
+        radial_prof = np.zeros(n_bins)
+        nonzero = nr > 0
+        radial_prof[nonzero] = tbin[nonzero] / nr[nonzero]
+        q_1d = np.sqrt(edges[:-1] * edges[1:])
+
+    valid_profile = (radial_prof > 0) & np.isfinite(radial_prof)
+    return q_1d[valid_profile], radial_prof[valid_profile]
+
 # --- Core Simulation Runner ---
 def run_simulation_core(params):
     mean_rg = float(params['mean_rg'])
@@ -116,17 +159,20 @@ def run_simulation_core(params):
     q_max = float(params['q_max'])
     q_min = float(params['q_min'])
     n_bins = int(float(params['n_bins']))
-    smearing = float(params['smearing'])
+    smearing = float(params.get('smearing', 0.0))
+    smearing_x = float(params.get('smearing_x', smearing))
+    smearing_y = float(params.get('smearing_y', smearing))
     flux = float(params['flux'])
     noise = bool(params['noise'])
     binning_mode = params['binning_mode']
+    r_steps = int(float(params.get('radius_samples', 400)))
+    q_steps = int(float(params.get('q_samples', 200)))
 
     mean_r = mean_rg * np.sqrt(5.0/3.0) 
     sigma = p_val * mean_r
 
     r_min = max(0.1, mean_r - 5 * sigma)
     r_max = mean_r + 15 * sigma
-    r_steps = 400
     r_vals = np.linspace(r_min, r_max, r_steps)
     
     if mode_key == 'IDP':
@@ -140,7 +186,6 @@ def run_simulation_core(params):
     area = trapezoid(pdf_vals, r_vals)
     if area > 0: pdf_vals /= area
 
-    q_steps = 200
     q_1d = np.logspace(np.log10(1e-3), np.log10(q_max * 1.5), q_steps)
 
     if mode_key == 'Sphere':
@@ -150,16 +195,13 @@ def run_simulation_core(params):
         i_matrix = debye_form_factor(q_1d, r_vals)
         i_1d_ideal = trapezoid(i_matrix * pdf_vals, r_vals, axis=1)
 
-    x = np.linspace(-q_max, q_max, pixels)
-    y = np.linspace(-q_max, q_max, pixels)
-    xv, yv = np.meshgrid(x, y)
-    qv_r = np.sqrt(xv**2 + yv**2)
+    _, _, _, qv_r = build_detector_q_grid(pixels, q_max)
 
     i_2d_ideal = np.interp(qv_r.ravel(), q_1d, i_1d_ideal, left=i_1d_ideal[0], right=0)
     i_2d_ideal = i_2d_ideal.reshape(pixels, pixels)
 
-    if smearing > 0:
-        i_2d_smeared = gaussian_filter(i_2d_ideal, sigma=smearing)
+    if smearing_x > 0 or smearing_y > 0:
+        i_2d_smeared = gaussian_filter(i_2d_ideal, sigma=(smearing_y, smearing_x))
     else:
         i_2d_smeared = i_2d_ideal
 
@@ -179,33 +221,12 @@ def run_simulation_core(params):
     else:
         i_2d_final = i_2d_scaled
 
-    # Radial Averaging
-    if binning_mode == "Linear" or binning_mode == "Lin":
-        sim_bin_width = (q_max - q_min) / n_bins
-        if sim_bin_width <= 0: sim_bin_width = q_max / n_bins
-        r_indices = ((qv_r - q_min) / sim_bin_width).astype(int).ravel()
-        valid_mask = (r_indices >= 0) & (r_indices < n_bins) & (qv_r.ravel() <= q_max)
-        tbin = np.bincount(r_indices[valid_mask], weights=i_2d_final.ravel()[valid_mask], minlength=n_bins)
-        nr = np.bincount(r_indices[valid_mask], minlength=n_bins)
-        radial_prof = np.zeros(n_bins)
-        nonzero = nr > 0
-        radial_prof[nonzero] = tbin[nonzero] / nr[nonzero]
-        q_sim = q_min + (np.arange(n_bins) + 0.5) * sim_bin_width
-    else: # Logarithmic
-        q_min_log = max(q_min, 1e-4)
-        edges = np.logspace(np.log10(q_min_log), np.log10(q_max), n_bins + 1)
-        r_vals_flat = qv_r.ravel()
-        i_vals_flat = i_2d_final.ravel()
-        inds = np.digitize(r_vals_flat, edges)
-        valid_mask = (inds >= 1) & (inds <= n_bins)
-        valid_inds = inds[valid_mask] - 1 
-        tbin = np.bincount(valid_inds, weights=i_vals_flat[valid_mask], minlength=n_bins)
-        nr = np.bincount(valid_inds, minlength=n_bins)
-        radial_prof = np.zeros(n_bins)
-        nonzero = nr > 0
-        radial_prof[nonzero] = tbin[nonzero] / nr[nonzero]
-        q_sim = np.sqrt(edges[:-1] * edges[1:])
-
-    valid_sim = radial_prof > 0
-    # Return non-zero points for analysis
-    return q_sim[valid_sim], radial_prof[valid_sim], i_2d_final, r_vals, pdf_vals
+    q_sim, radial_prof = radial_average_detector_image(
+        i_2d=i_2d_final,
+        q_r=qv_r,
+        q_min=q_min,
+        q_max=q_max,
+        n_bins=n_bins,
+        binning_mode=binning_mode,
+    )
+    return q_sim, radial_prof, i_2d_final, r_vals, pdf_vals

@@ -1,152 +1,297 @@
 # File: single_mode.py
-# Last Updated: Tuesday, February 10, 2026
+# Last Updated: Monday, March 30, 2026
 # Description: Handling single, interactive simulation runs.
 
-import streamlit as st
 import numpy as np
-import plotly.graph_objects as go
 import pandas as pd
-from sim_utils import run_simulation_core, get_distribution
+import plotly.graph_objects as go
+import streamlit as st
+
+from app_settings import ensure_session_state_defaults, get_forward_flux
 from analysis_utils import (
-    perform_saxs_analysis,
-    get_header_string,
-    create_intensity_csv,
-    create_distribution_csv,
-    parse_saxs_file,
-    build_sanity_summary_row,
     build_reconstruction_quality_summary,
-    recommend_tomchuk_settings,
+    build_sanity_summary_row,
     calculate_sphere_input_theoretical_parameters,
+    create_distribution_csv,
+    create_intensity_csv,
+    get_header_string,
     normalize_simulated_sphere_intensity,
+    parse_saxs_file,
+    perform_saxs_analysis,
+    recommend_tomchuk_settings,
 )
+from sim_utils import get_distribution, run_simulation_core
+
+
+def _build_analysis_settings(q_max):
+    return {
+        **st.session_state,
+        "q_max_for_tenor": q_max,
+    }
+
+
+def _build_simulation_params(mode_key, dist_type, mean_rg, p_val, pixels, q_min, q_max, n_bins, smearing_x, smearing_y, flux, noise, binning_mode):
+    return {
+        "mean_rg": mean_rg,
+        "p_val": p_val,
+        "dist_type": dist_type,
+        "mode": mode_key,
+        "pixels": pixels,
+        "q_min": q_min,
+        "q_max": q_max,
+        "n_bins": n_bins,
+        "smearing": 0.5 * (smearing_x + smearing_y),
+        "smearing_x": smearing_x,
+        "smearing_y": smearing_y,
+        "flux": flux,
+        "noise": noise,
+        "binning_mode": binning_mode,
+        "radius_samples": int(st.session_state.radius_samples),
+        "q_samples": int(st.session_state.q_samples),
+    }
+
+
+def _render_extracted_table(analysis_res, analysis_method, theoretical_values):
+    if analysis_method == "Tomchuk":
+        param_list = [
+            "Rg (Guinier)",
+            "G (Guinier)",
+            "Rg (Selected)",
+            "G (Selected)",
+            "Q",
+            "lc",
+            "B",
+            "PDI",
+            "PDI2",
+        ]
+        extracted_numeric = [
+            analysis_res.get("Rg_guinier", analysis_res.get("Rg", 0)),
+            analysis_res.get("G_guinier", analysis_res.get("G", 0)),
+            analysis_res.get("Rg", 0),
+            analysis_res.get("G", 0),
+            analysis_res.get("Q", 0),
+            analysis_res.get("lc", 0),
+            analysis_res.get("B", 0),
+            analysis_res.get("PDI", 0),
+            analysis_res.get("PDI2", 0),
+        ]
+        formats = ["{:.2f} nm", "{:.2e}", "{:.2f} nm", "{:.2e}", "{:.2e}", "{:.2f} nm", "{:.2e}", "{:.4f}", "{:.4f}"]
+        theory_numeric = None
+        if theoretical_values is not None:
+            theory_numeric = [
+                theoretical_values.get("Rg", 0),
+                theoretical_values.get("G", 0),
+                theoretical_values.get("Rg", 0),
+                theoretical_values.get("G", 0),
+                theoretical_values.get("Q", 0),
+                theoretical_values.get("lc", 0),
+                theoretical_values.get("B", 0),
+                theoretical_values.get("PDI", 0),
+                theoretical_values.get("PDI2", 0),
+            ]
+    elif analysis_method == "Tenor":
+        param_list = [
+            "Rg (Apparent Guinier)",
+            "Mean Rg (Recovered)",
+            "Mean Radius (Recovered)",
+            "Weighted Variance",
+            "Raw g1/g0",
+            "Dimensionless J_G",
+            "Raw m1/m0",
+            "Candidate PSF Pairs",
+        ]
+        extracted_numeric = [
+            analysis_res.get("Rg_guinier", 0),
+            analysis_res.get("Rg", 0),
+            analysis_res.get("mean_r_rec", 0),
+            analysis_res.get("weighted_v", 0),
+            analysis_res.get("tenor_raw_g1_over_g0", 0),
+            analysis_res.get("tenor_dimless_jg", 0),
+            analysis_res.get("tenor_raw_m1_over_m0", 0),
+            analysis_res.get("tenor_candidate_count", 0),
+        ]
+        formats = ["{:.2f} nm", "{:.2f} nm", "{:.2f} nm", "{:.4f}", "{:.2e}", "{:.2e}", "{:.2e}", "{:.0f}"]
+        theory_numeric = None
+    else:
+        param_list = ["Rg (Guinier)", "G (Guinier)"]
+        extracted_numeric = [
+            analysis_res.get("Rg_guinier", analysis_res.get("Rg", 0)),
+            analysis_res.get("G_guinier", analysis_res.get("G", 0)),
+        ]
+        formats = ["{:.2f} nm", "{:.2e}"]
+        theory_numeric = None
+
+    extracted_vals = [fmt.format(val) for fmt, val in zip(formats, extracted_numeric)]
+    if theory_numeric is None:
+        theory_vals = ["n/a"] * len(extracted_vals)
+        rel_err_vals = ["n/a"] * len(extracted_vals)
+    else:
+        theory_vals = [fmt.format(val) for fmt, val in zip(formats, theory_numeric)]
+        rel_err_vals = []
+        for extracted_val, theory_val in zip(extracted_numeric, theory_numeric):
+            if theory_val != 0:
+                rel_err_vals.append(f"{((extracted_val - theory_val) / theory_val):+.2%}")
+            else:
+                rel_err_vals.append("n/a")
+
+    st.dataframe(
+        pd.DataFrame(
+            {
+                "Parameter": param_list,
+                "Extracted": extracted_vals,
+                "Theory": theory_vals,
+                "RelErr": rel_err_vals,
+            }
+        ),
+        hide_index=True,
+        width="stretch",
+        height=280,
+    )
+
 
 def run():
-    st.sidebar.title("Configuration")
-    
-    if st.sidebar.button("🏠 Return to Home"):
-        st.session_state.page = 'home'
+    ensure_session_state_defaults(st.session_state)
+
+    st.sidebar.title("Navigation")
+    if st.sidebar.button("Return to Home"):
+        st.session_state.page = "home"
         st.rerun()
 
-    sim_mode = st.sidebar.radio("Simulation Mode", ["Polydisperse Spheres", "Fixed-Length Polymers (IDP)"])
-    mode_key = 'Sphere' if 'Sphere' in sim_mode else 'IDP'
+    st.header("Single Simulation / Analysis")
+    tab_settings, tab_visuals, tab_results = st.tabs(["Settings", "Visuals", "Results"])
 
-    analysis_method = 'NNLS'
-    if mode_key == 'Sphere':
-        analysis_method = st.sidebar.selectbox("Analysis Method", ["Tomchuk (Invariants)", "NNLS (Distribution Fit)"])
-        analysis_method = "Tomchuk" if "Tomchuk" in analysis_method else "NNLS"
-    st.session_state['analysis_method'] = analysis_method
-
-    st.sidebar.header("Experimental Data")
-    uploaded_file = st.sidebar.file_uploader("Load 1D Profile", type=['dat', 'out', 'txt', 'csv'])
     use_experimental = False
-    q_meas, i_meas = None, None
-
-    if uploaded_file is not None:
-        q_load, i_load, err = parse_saxs_file(uploaded_file)
-        if err: st.sidebar.error(err)
-        else:
-            st.sidebar.success(f"Loaded {len(q_load)} points.")
-            use_experimental = st.sidebar.checkbox("Use Loaded Data", value=True)
-            if use_experimental:
-                q_meas, i_meas = q_load, i_load
-                if st.session_state.get('last_filename') != uploaded_file.name:
-                    st.session_state['last_filename'] = uploaded_file.name
-                    st.session_state['q_min'] = float(np.min(q_meas))
-                    st.session_state['q_max'] = float(np.max(q_meas))
-                    st.session_state['n_bins'] = len(q_meas)
-                    res = perform_saxs_analysis(q_meas, i_meas, 'Gaussian', 4.0, mode_key, analysis_method, 50.0)
-                    if res['Rg'] > 0: 
-                        st.session_state['mean_rg'] = float(res['Rg'])
-                        if res['Rg'] > 0: st.session_state['nnls_max_rg'] = float(round(5 * res['Rg'], 1))
-                    st.rerun()
-
-    # Callbacks
-    def update_q_max():
-        if st.session_state.mean_rg > 0:
-            st.session_state.q_max = round(10.0 / st.session_state.mean_rg, 2)
-    def update_q_max_and_basis():
-        if st.session_state.mean_rg > 0:
-            st.session_state.q_max = round(10.0 / st.session_state.mean_rg, 2)
-            p = st.session_state.get('p_val', 0.3)
-            st.session_state.nnls_max_rg = float(round(st.session_state.mean_rg * (1 + 6 * p), 1))
-
-    st.sidebar.header("Sample Parameters")
-    mean_rg = st.sidebar.number_input("Mean Rg (nm)",value=2.0, min_value=0.5, max_value=50.0, step=0.5, key='mean_rg', on_change=update_q_max_and_basis)
-    p_val = st.sidebar.number_input("Polydispersity (p)", value= 0.3, min_value=0.01, max_value=6.0, step=0.01, key='p_val', on_change=update_q_max_and_basis)
-    dist_label = "Distribution Type" if mode_key == 'Sphere' else "Conformational Distribution"
-    dist_type = st.sidebar.selectbox(dist_label, ['Gaussian', 'Lognormal', 'Schulz', 'Boltzmann', 'Triangular', 'Uniform'], key='dist_type')
-    if mode_key == 'Sphere' and analysis_method == 'Tomchuk' and p_val < 0.25:
-        st.sidebar.warning("Tomchuk analysis is intended for highly polydisperse spheres; results below p = 0.25 may be unreliable.")
-
-    st.sidebar.header("NNLS Settings")
-    nnls_max_rg = st.sidebar.number_input("Max Rg (Basis Set)", min_value=1.0, max_value=500.0, step=1.0, key='nnls_max_rg')
-
-    st.sidebar.header("Instrument / Binning")
-    pixels = st.sidebar.number_input("Detector Size (NxN)", value=1000, step=64, key='pixels')
-    c_q1, c_q2 = st.sidebar.columns(2)
-    with c_q1: q_min = st.sidebar.number_input("Min q", min_value=0.0, step=0.01, key='q_min')
-    with c_q2: q_max = st.sidebar.number_input("Max q", min_value=0.01, step=0.1, key='q_max')
-    n_bins = st.sidebar.number_input("1D Bins", value=256, min_value=10, step=10, key='n_bins')
-    binning_mode = st.sidebar.selectbox("Binning Mode", ["Logarithmic", "Linear"], key='binning_mode')
-    smearing = st.sidebar.number_input("Smearing (px)", value=3.0, step=0.5, key='smearing')
-
-    st.sidebar.header("Forward Pixel Photons & Noise")
-    c_f1, c_f2 = st.sidebar.columns(2)
-    flux_help = (
-        "Flux is interpreted as I(0)/(pixel dimension): "
-        "the target expected photons in the nearest-to-center detector pixel "
-        "after smearing and before Poisson noise."
-    )
-    with c_f1:
-        flux_pre = st.number_input("Forward Coeff", 0.1, 9.9, 1.0, 0.1, key='flux_pre', help=flux_help)
-    with c_f2:
-        flux_exp = st.number_input("Forward Exp", 1, 15, 8, 1, key='flux_exp', help=flux_help)
-    st.sidebar.caption("Target expected photons in the nearest-to-center detector pixel before Poisson noise.")
-    optimal_flux = st.sidebar.checkbox("Deterministic Counts (No Noise)", value=False, key='optimal_flux')
-    add_noise = st.sidebar.checkbox("Simulate Poisson Noise", value=True, disabled=optimal_flux, key='add_noise')
-
+    q_meas = None
+    i_meas = None
     recommendation = None
-    if mode_key == 'Sphere' and analysis_method == 'Tomchuk':
-        st.sidebar.header("Tomchuk Evaluator")
-        target_abs_error = st.sidebar.number_input(
-            "Target abs. p error",
-            min_value=0.001,
-            max_value=1.0,
-            value=0.01,
-            step=0.005,
-            key='tomchuk_target_abs_error'
-        )
-        recommendation_key = (mean_rg, p_val, dist_type, pixels, smearing, flux_pre, flux_exp, optimal_flux, add_noise, target_abs_error)
-        if st.sidebar.button("Evaluate q-range / bins", key='eval_tomchuk_grid'):
-            with st.spinner("Sweeping q-range and 1D bins..."):
-                recommendation = recommend_tomchuk_settings(
-                    mean_rg=mean_rg,
-                    p_val=p_val,
-                    dist_type=dist_type,
-                    pixels=pixels,
-                    smearing=smearing,
-                    flux=flux_pre * (10**flux_exp),
-                    noise=(not optimal_flux and add_noise),
-                    q_min=q_min,
-                    binning_mode=binning_mode,
-                    target_abs_error=target_abs_error,
-                )
-                st.session_state['tomchuk_recommendation'] = recommendation
-                st.session_state['tomchuk_recommendation_key'] = recommendation_key
-        if st.session_state.get('tomchuk_recommendation_key') == recommendation_key:
-            recommendation = st.session_state.get('tomchuk_recommendation')
 
-    # --- Run Simulation ---
-    params = {
-        'mean_rg': mean_rg, 'p_val': p_val, 'dist_type': dist_type, 'mode': mode_key,
-        'pixels': pixels, 'q_min': q_min, 'q_max': q_max, 'n_bins': n_bins,
-        'smearing': smearing, 'flux': flux_pre * (10**flux_exp), 'noise': (not optimal_flux and add_noise),
-        'binning_mode': binning_mode
-    }
-    
+    with tab_settings:
+        st.subheader("Experiment and Method")
+        c0, c1, c2 = st.columns(3)
+        with c0:
+            sim_mode = st.radio("Simulation Mode", ["Polydisperse Spheres", "Fixed-Length Polymers (IDP)"], key="sim_mode")
+        mode_key = "Sphere" if "Sphere" in sim_mode else "IDP"
+        analysis_options = ["Tomchuk", "NNLS", "Tenor-SAXS"] if mode_key == "Sphere" else ["NNLS"]
+        default_analysis = st.session_state.get("analysis_method", "NNLS")
+        if default_analysis == "Tenor":
+            default_analysis = "Tenor-SAXS"
+        if default_analysis not in analysis_options:
+            default_analysis = analysis_options[0]
+        analysis_label = c1.selectbox("Analysis Method", analysis_options, index=analysis_options.index(default_analysis))
+        analysis_method = "Tenor" if "Tenor" in analysis_label else analysis_label
+        st.session_state["analysis_method"] = analysis_method
+        with c2:
+            uploaded_file = st.file_uploader("Load 1D Profile", type=["dat", "out", "txt", "csv"])
+            if uploaded_file is not None:
+                q_load, i_load, err = parse_saxs_file(uploaded_file)
+                if err:
+                    st.error(err)
+                else:
+                    st.success(f"Loaded {len(q_load)} points.")
+                    use_experimental = st.checkbox("Use loaded 1D data", value=True, key="use_loaded_data")
+                    q_meas, i_meas = q_load, i_load
+
+        st.subheader("Sample")
+        c3, c4, c5 = st.columns(3)
+        mean_rg = c3.number_input("Mean Rg (nm)", min_value=0.5, max_value=50.0, step=0.5, key="mean_rg")
+        p_val = c4.number_input("Polydispersity (p)", min_value=0.01, max_value=6.0, step=0.01, key="p_val")
+        dist_label = "Distribution Type" if mode_key == "Sphere" else "Conformational Distribution"
+        dist_type = c5.selectbox(dist_label, ["Gaussian", "Lognormal", "Schulz", "Boltzmann", "Triangular", "Uniform"], key="dist_type")
+        if mode_key == "Sphere" and analysis_method == "Tomchuk" and p_val < 0.25:
+            st.warning("Tomchuk analysis is intended for highly polydisperse spheres; results below p = 0.25 may be unreliable.")
+
+        st.subheader("Instrument and Binning")
+        c6, c7, c8, c9 = st.columns(4)
+        pixels = int(c6.number_input("Detector Size (NxN)", min_value=64, step=64, key="pixels"))
+        q_min = c7.number_input("Min q", min_value=0.0, step=0.01, key="q_min")
+        q_max = c8.number_input("Max q", min_value=0.01, step=0.1, key="q_max")
+        n_bins = int(c9.number_input("1D Bins", min_value=10, step=10, key="n_bins"))
+        c10, c11, c12 = st.columns(3)
+        binning_mode = c10.selectbox("Binning Mode", ["Logarithmic", "Linear"], key="binning_mode")
+        smearing_x = c11.number_input("Smearing X (px)", min_value=0.0, step=0.5, key="smearing_x")
+        smearing_y = c12.number_input("Smearing Y (px)", min_value=0.0, step=0.5, key="smearing_y")
+
+        st.subheader("Photon Statistics")
+        flux_help = (
+            "Flux is interpreted as I(0)/(pixel dimension): "
+            "the target expected photons in the nearest-to-center detector pixel "
+            "after smearing and before Poisson noise."
+        )
+        c13, c14, c15 = st.columns(3)
+        flux_pre = c13.number_input("Forward Coeff", 0.1, 9.9, key="flux_pre", step=0.1, help=flux_help)
+        flux_exp = c14.number_input("Forward Exp", 1, 15, key="flux_exp", step=1, help=flux_help)
+        optimal_flux = c15.checkbox("Deterministic Counts", key="optimal_flux")
+        add_noise = st.checkbox("Simulate Poisson Noise", value=st.session_state.add_noise, disabled=optimal_flux, key="add_noise")
+
+        st.subheader("Simulation and Analysis Settings")
+        c16, c17, c18, c19 = st.columns(4)
+        c16.number_input("Radius Samples", min_value=50, step=50, key="radius_samples")
+        c17.number_input("q Samples", min_value=50, step=50, key="q_samples")
+        c18.number_input("NNLS Basis Count", min_value=20, step=10, key="nnls_basis_count")
+        c19.number_input("NNLS Smooth Sigma", min_value=0.0, step=0.1, key="nnls_smooth_sigma")
+        nnls_max_rg = st.number_input("NNLS Max Rg (Basis Set)", min_value=1.0, max_value=500.0, step=1.0, key="nnls_max_rg")
+
+        if mode_key == "Sphere" and analysis_method == "Tenor":
+            st.subheader("Tenor-SAXS Settings")
+            c20, c21, c22, c23 = st.columns(4)
+            c20.number_input("TENOR Guinier Bins", min_value=32, step=16, key="tenor_guinier_bins")
+            c21.number_input("TENOR Radial Bins", min_value=6, step=1, key="tenor_radial_bins")
+            c22.number_input("TENOR qRg Limit", min_value=0.2, max_value=2.0, step=0.05, key="tenor_qrg_limit")
+            c23.number_input("TENOR PSF Pair Count", min_value=1, step=1, key="tenor_psf_count")
+            c24, c25, c26, c27 = st.columns(4)
+            c24.number_input("TENOR PSF SigmaX Start", min_value=0.1, step=0.1, key="tenor_psf_sigma_x_start")
+            c25.number_input("TENOR PSF SigmaY Start", min_value=0.1, step=0.1, key="tenor_psf_sigma_y_start")
+            c26.number_input("TENOR PSF Sigma Step", min_value=0.05, step=0.05, key="tenor_psf_sigma_step")
+            c27.number_input("TENOR Secondary Ratio", min_value=0.1, max_value=1.0, step=0.05, key="tenor_psf_secondary_ratio")
+            c28, c29, c30 = st.columns(3)
+            c28.number_input("TENOR p Min", min_value=0.001, step=0.01, key="tenor_calibration_p_min")
+            c29.number_input("TENOR p Max", min_value=0.01, step=0.01, key="tenor_calibration_p_max")
+            c30.number_input("TENOR Calibration Points", min_value=4, step=1, key="tenor_calibration_p_count")
+
+        if mode_key == "Sphere" and analysis_method == "Tomchuk":
+            st.subheader("Tomchuk Evaluator")
+            target_abs_error = st.number_input("Target abs. p error", min_value=0.001, max_value=1.0, step=0.005, key="tomchuk_target_abs_error")
+            if st.button("Evaluate q-range / bins", key="eval_tomchuk_grid"):
+                with st.spinner("Sweeping q-range and 1D bins..."):
+                    recommendation = recommend_tomchuk_settings(
+                        mean_rg=mean_rg,
+                        p_val=p_val,
+                        dist_type=dist_type,
+                        pixels=pixels,
+                        smearing_x=smearing_x,
+                        smearing_y=smearing_y,
+                        flux=get_forward_flux(st.session_state),
+                        noise=(not optimal_flux and add_noise),
+                        q_min=q_min,
+                        binning_mode=binning_mode,
+                        target_abs_error=target_abs_error,
+                        radius_samples=int(st.session_state.radius_samples),
+                        q_samples=int(st.session_state.q_samples),
+                    )
+                    st.session_state["tomchuk_recommendation"] = recommendation
+            recommendation = st.session_state.get("tomchuk_recommendation")
+
+    if analysis_method == "Tenor" and use_experimental:
+        use_experimental = False
+        st.warning("TENOR-SAXS currently requires a 2D detector image, so uploaded 1D profiles are not used in this mode.")
+
+    params = _build_simulation_params(
+        mode_key=mode_key,
+        dist_type=dist_type,
+        mean_rg=mean_rg,
+        p_val=p_val,
+        pixels=pixels,
+        q_min=q_min,
+        q_max=q_max,
+        n_bins=n_bins,
+        smearing_x=smearing_x,
+        smearing_y=smearing_y,
+        flux=get_forward_flux(st.session_state),
+        noise=(not optimal_flux and add_noise),
+        binning_mode=binning_mode,
+    )
     q_sim, i_sim, i_2d_final, r_vals, pdf_vals = run_simulation_core(params)
-    
-    # Active Data
+
     if use_experimental and q_meas is not None:
         mask = (q_meas >= q_min) & (q_meas <= q_max)
         q_target = q_meas[mask]
@@ -156,258 +301,230 @@ def run():
         q_target = q_sim
         i_target = i_sim
         normalization_scale = 1.0
-        if mode_key == 'Sphere' and analysis_method == 'Tomchuk':
+        if mode_key == "Sphere" and analysis_method == "Tomchuk":
             i_target, normalization_scale = normalize_simulated_sphere_intensity(q_target, i_target, r_vals, pdf_vals)
 
-    # Run Analysis
-    analysis_res = perform_saxs_analysis(q_target, i_target, dist_type, mean_rg, mode_key, analysis_method, nnls_max_rg)
-    analysis_res['simulation_normalization_scale'] = normalization_scale
-    reconstruction_summary = build_reconstruction_quality_summary(analysis_res) if analysis_method == 'Tomchuk' else None
-    sanity_summary = None
+    analysis_res = perform_saxs_analysis(
+        q_target,
+        i_target,
+        dist_type,
+        mean_rg,
+        mode_key,
+        analysis_method,
+        nnls_max_rg,
+        i_2d=i_2d_final,
+        analysis_settings=_build_analysis_settings(q_max),
+    )
+    analysis_res["simulation_normalization_scale"] = normalization_scale
+
+    reconstruction_summary = build_reconstruction_quality_summary(analysis_res) if analysis_method == "Tomchuk" else None
     theoretical_values = None
-    if (not use_experimental) and mode_key == 'Sphere' and analysis_method == 'Tomchuk':
+    sanity_summary = None
+    if (not use_experimental) and mode_key == "Sphere" and analysis_method == "Tomchuk":
         sanity_summary = build_sanity_summary_row(q_target, i_target, r_vals, pdf_vals, analysis_res)
         theoretical_values = calculate_sphere_input_theoretical_parameters(mean_rg, p_val, dist_type)
 
-    # --- Define Input Label EARLY for use in all columns ---
-    input_label = "Ref (Sidebar)" if use_experimental else ("Input (normalized)" if normalization_scale != 1.0 else "Input")
-
-    # --- Visualization ---
-    col_viz1, col_viz2 = st.columns(2)
-
-    with col_viz1:
-        if use_experimental:
-            st.subheader("Experimental Data Active")
-            st.info("Analyzing uploaded 1D data. 2D view disabled.")
-        else:
-            st.subheader("2D Detector")
-            fig_2d = go.Figure(data=go.Heatmap(
-                z=np.log10(np.maximum(i_2d_final, 1)),
-                x=np.linspace(-q_max, q_max, pixels),
-                y=np.linspace(-q_max, q_max, pixels),
-                colorscale='Jet',
-                colorbar=dict(title='log10(I)')
-            ))
-            fig_2d.update_layout(xaxis_title='qx', yaxis_title='qy', width=470, height=360, margin=dict(l=30,r=30,t=20,b=30), yaxis=dict(scaleanchor="x", scaleratio=1))
-            st.plotly_chart(fig_2d)
-
-    with col_viz2:
-        st.subheader("1D Profile Analysis")
-        plot_opts = ["Log-Log", "Lin-Lin", "Guinier", "Kratky"]
-        if mode_key == 'Sphere': plot_opts.append("Porod")
-        plot_type = st.selectbox("Plot Type", plot_opts)
-        
-        fig_1d = go.Figure()
-        label_str = 'Experimental' if use_experimental else 'Simulated'
-        color_str = 'green' if use_experimental else 'blue'
-
-        plot_x, plot_y = q_target, i_target
-        x_type, y_type = 'linear', 'linear'
-        x_label, y_label = 'q (nm⁻¹)', 'I(q)'
-        
-        if plot_type == "Log-Log": x_type, y_type = 'log', 'log'
-        elif plot_type == "Guinier": 
-            plot_x = q_target**2; plot_y = np.log(np.maximum(i_target, 1e-9))
-            x_label = 'q²'; y_label = 'ln(I)'
-        elif plot_type == "Porod": plot_y = i_target * (q_target**4); y_label = 'I · q⁴'
-        elif plot_type == "Kratky": plot_y = i_target * (q_target**2); y_label = 'I · q²'
-
-        fig_1d.add_trace(go.Scatter(x=plot_x, y=plot_y, mode='markers', name=label_str, marker=dict(color=color_str, size=4)))
-
-        fit_arr = np.asarray(analysis_res.get('I_fit', []), dtype=float)
-        if fit_arr.ndim == 1 and len(fit_arr) == len(q_target):
-            fit_y = fit_arr
-            fit_x = q_target
-            if plot_type == "Guinier": fit_x = q_target**2; fit_y = np.log(np.maximum(fit_y, 1e-9))
-            elif plot_type == "Porod": fit_y = fit_y * (q_target**4)
-            elif plot_type == "Kratky": fit_y = fit_y * (q_target**2)
-            fig_1d.add_trace(go.Scatter(x=fit_x, y=fit_y, mode='lines', name='Global Fit', line=dict(color='orange', dash='dash', width=2)))
-
-        if plot_type == "Guinier":
-            rg_f = analysis_res.get('Rg_guinier', analysis_res['Rg'])
-            g_f = analysis_res.get('G_guinier', analysis_res['G'])
-            if rg_f > 0:
-                x_line = np.linspace(0, (1.2/rg_f)**2, 50)
-                y_line = np.log(g_f) - (rg_f**2/3.0)*x_line
-                fig_1d.add_trace(go.Scatter(x=x_line, y=y_line, mode='lines', name='Guinier Linear', line=dict(color='red', dash='dot')))
-                fig_1d.update_xaxes(range=[0, (2.0/rg_f)**2])
-                fig_1d.update_yaxes(range=[np.log(g_f)-3, np.log(g_f)+0.5])
-        elif plot_type == "Porod" and analysis_method == 'Tomchuk':
-            if 'B' in analysis_res and analysis_res['B'] > 0:
-                fig_1d.add_hline(y=analysis_res['B'], line_dash="dot", line_color="red", annotation_text="B (Fit)")
-
-        fig_1d.update_layout(xaxis_title=x_label, yaxis_title=y_label, xaxis_type=x_type, yaxis_type=y_type, width=470, height=360, margin=dict(l=30,r=30,t=20,b=30))
-        st.plotly_chart(fig_1d)
-
-    # --- Results & Distribution Visuals ---
-    st.markdown("---")
-    c1, c2, c3, c4 = st.columns(4)
-    
-    with c1:
-        st.markdown("**Parameters**")
-        st.metric(input_label + " Rg", f"{mean_rg:.2f} nm")
-        if analysis_method == 'Tomchuk':
-            st.metric("Rec. p (PDI)", f"{analysis_res.get('p_rec_pdi', 0):.3f}")
-            st.metric("Rec. Mean Radius (PDI)", f"{analysis_res.get('mean_r_rec_pdi', 0):.2f} nm")
-            st.metric("Rec. p (PDI₂)", f"{analysis_res.get('p_rec_pdi2', 0):.3f}")
-            st.metric("Rec. Mean Radius (PDI₂)", f"{analysis_res.get('mean_r_rec_pdi2', 0):.2f} nm")
-        else:
-            input_mean_r = mean_rg * np.sqrt(5.0 / 3.0) if mode_key == 'Sphere' else mean_rg
-            rec_size = analysis_res.get('mean_r_rec', 0) if mode_key == 'Sphere' else analysis_res.get('rg_num_rec', 0)
-            rec_label = "NNLS Mean Radius" if mode_key == 'Sphere' else "NNLS Mean Rg"
-            st.metric(rec_label, f"{rec_size:.2f} nm", delta=f"{rec_size - input_mean_r:.2f}")
-            st.metric("NNLS Width (p)", f"{analysis_res.get('p_rec', 0):.3f}")
-        if 'rrms' in analysis_res:
-            st.metric("Fit RelRMS", f"{analysis_res.get('rrms', 0):.4f}")
-
-    with c2:
-        st.markdown("**Extracted Values**")
-        if analysis_method == 'Tomchuk':
-            st.metric("Tomchuk Path", analysis_res.get('tomchuk_extraction', 'n/a'))
-        val_list = [f"{analysis_res.get('Rg', 0):.2f} nm", f"{analysis_res.get('G', 0):.2e}"]
-        theory_list = ["n/a", "n/a"]
-        rel_err_list = ["n/a", "n/a"]
-        param_list = ["Rg (Extracted)", "G"]
-        if analysis_method == 'Tomchuk':
-            val_list = [
-                f"{analysis_res.get('Rg_guinier', analysis_res.get('Rg', 0)):.2f} nm",
-                f"{analysis_res.get('G_guinier', analysis_res.get('G', 0)):.2e}",
-                f"{analysis_res.get('Rg', 0):.2f} nm",
-                f"{analysis_res.get('G', 0):.2e}",
-            ]
-            theory_list = ["n/a", "n/a", "n/a", "n/a"]
-            rel_err_list = ["n/a", "n/a", "n/a", "n/a"]
-            param_list = ["Rg (Guinier)", "G (Guinier)", "Rg (Selected)", "G (Selected)"]
-            val_list.extend([
-                f"{analysis_res.get('Q', 0):.2e}",
-                f"{analysis_res.get('lc', 0):.2f} nm",
-                f"{analysis_res.get('B', 0):.2e}",
-                f"{analysis_res.get('PDI', 0):.4f}",
-                f"{analysis_res.get('PDI2', 0):.4f}",
-            ])
-            theory_list.extend(["n/a", "n/a", "n/a", "n/a", "n/a"])
-            rel_err_list.extend(["n/a", "n/a", "n/a", "n/a", "n/a"])
-            param_list.extend(["Q", "lc", "B", "PDI", "PDI2"])
-            if theoretical_values is not None:
-                extracted_numeric = [
-                    analysis_res.get('Rg_guinier', analysis_res.get('Rg', 0)),
-                    analysis_res.get('G_guinier', analysis_res.get('G', 0)),
-                    analysis_res.get('Rg', 0),
-                    analysis_res.get('G', 0),
-                    analysis_res.get('Q', 0),
-                    analysis_res.get('lc', 0),
-                    analysis_res.get('B', 0),
-                    analysis_res.get('PDI', 0),
-                    analysis_res.get('PDI2', 0),
-                ]
-                theory_numeric = [
-                    theoretical_values.get('Rg', 0),
-                    theoretical_values.get('G', 0),
-                    theoretical_values.get('Rg', 0),
-                    theoretical_values.get('G', 0),
-                    theoretical_values.get('Q', 0),
-                    theoretical_values.get('lc', 0),
-                    theoretical_values.get('B', 0),
-                    theoretical_values.get('PDI', 0),
-                    theoretical_values.get('PDI2', 0),
-                ]
-                theory_list = [
-                    f"{theory_numeric[0]:.2f} nm",
-                    f"{theory_numeric[1]:.2e}",
-                    f"{theory_numeric[2]:.2f} nm",
-                    f"{theory_numeric[3]:.2e}",
-                    f"{theory_numeric[4]:.2e}",
-                    f"{theory_numeric[5]:.2f} nm",
-                    f"{theory_numeric[6]:.2e}",
-                    f"{theory_numeric[7]:.4f}",
-                    f"{theory_numeric[8]:.4f}",
-                ]
-                rel_err_list = []
-                for extracted_val, theory_val in zip(extracted_numeric, theory_numeric):
-                    if theory_val != 0:
-                        rel_err_list.append(f"{((extracted_val - theory_val) / theory_val):+.2%}")
-                    else:
-                        rel_err_list.append("n/a")
-        res_df = pd.DataFrame({"Parameter": param_list, "Extracted": val_list, "Theory": theory_list, "RelErr": rel_err_list})
-        st.dataframe(res_df, hide_index=True, width='stretch', height=250)
-        if theoretical_values is not None:
-            if normalization_scale != 1.0:
-                st.caption(f"Simulated 1D data was normalized by {normalization_scale:.4e} before Tomchuk analysis so extracted amplitudes can be compared to input-based theory.")
-        if reconstruction_summary is not None:
-            recon_rows = pd.DataFrame([
-                {"Variant": "PDI", "RelRMS": f"{reconstruction_summary['rrms_pdi']:.4f}", "Quality": reconstruction_summary['quality_pdi']},
-                {"Variant": "PDI2", "RelRMS": f"{reconstruction_summary['rrms_pdi2']:.4f}", "Quality": reconstruction_summary['quality_pdi2']},
-            ])
-            st.caption(f"Best reconstructed fit: {reconstruction_summary['best_variant']}")
-            st.dataframe(recon_rows, hide_index=True, width='stretch', height=115)
-
-    with c3:
-        st.markdown("**Sanity Check**")
-        if sanity_summary is None:
+    with tab_visuals:
+        c1, c2 = st.columns(2)
+        with c1:
             if use_experimental:
-                st.caption("Unavailable for uploaded data because the true simulated distribution is not known.")
-            elif mode_key != 'Sphere' or analysis_method != 'Tomchuk':
-                st.caption("Shown for simulated sphere runs in Tomchuk mode.")
-        else:
-            st.metric("Sanity", "PASS" if sanity_summary.get('Sanity_Pass') else "CHECK")
-            st.caption(f"Failures: {sanity_summary.get('Sanity_Failures', 'none')}")
-            st.caption(sanity_summary.get('Sanity_Suggestions', ''))
-        if recommendation:
-            st.markdown("**Recommended q / bins**")
-            best = recommendation.get('best')
-            safety = recommendation.get('safety_zone')
-            if best:
-                st.caption(
-                    f"Best: q_max={best['q_max']:.2f}, bins={best['n_bins']}, "
-                    f"p(PDI)={best['p_pdi']:.3f}, p(PDI2)={best['p_pdi2']:.3f}"
+                st.info("Analyzing uploaded 1D data. 2D detector view is disabled.")
+            else:
+                fig_2d = go.Figure(
+                    data=go.Heatmap(
+                        z=np.log10(np.maximum(i_2d_final, 1.0)),
+                        x=np.linspace(-q_max, q_max, pixels),
+                        y=np.linspace(-q_max, q_max, pixels),
+                        colorscale="Jet",
+                        colorbar=dict(title="log10(I)"),
+                    )
                 )
-                st.caption(
-                    f"Max abs. p error={best['max_abs_err']:.3f}; "
-                    f"best fit={best['best_variant']} (RelRMS={best['best_rrms']:.4f})"
+                fig_2d.update_layout(
+                    title="2D Detector",
+                    xaxis_title="qx",
+                    yaxis_title="qy",
+                    width=500,
+                    height=400,
+                    margin=dict(l=30, r=30, t=40, b=30),
+                    yaxis=dict(scaleanchor="x", scaleratio=1),
                 )
-            if safety:
-                st.caption(
-                    f"Safety zone: q_max {safety['q_max_min']:.2f}-{safety['q_max_max']:.2f}, "
-                    f"bins {safety['n_bins_min']}-{safety['n_bins_max']}"
-                )
-            st.caption(
-                f"Target hits: {len(recommendation.get('passing_rows', []))} combinations at "
-                f"abs. p error <= {recommendation.get('target_abs_error', 0):.3f}"
+                st.plotly_chart(fig_2d, use_container_width=True)
+
+        with c2:
+            plot_opts = ["Log-Log", "Lin-Lin", "Guinier", "Kratky"]
+            if mode_key == "Sphere":
+                plot_opts.append("Porod")
+            plot_type = st.selectbox("Plot Type", plot_opts)
+            fig_1d = go.Figure()
+            plot_x, plot_y = q_target, i_target
+            x_type, y_type = "linear", "linear"
+            x_label, y_label = "q (nm⁻¹)", "I(q)"
+            if plot_type == "Log-Log":
+                x_type, y_type = "log", "log"
+            elif plot_type == "Guinier":
+                plot_x = q_target ** 2
+                plot_y = np.log(np.maximum(i_target, 1e-9))
+                x_label, y_label = "q²", "ln(I)"
+            elif plot_type == "Porod":
+                plot_y = i_target * (q_target ** 4)
+                y_label = "I · q⁴"
+            elif plot_type == "Kratky":
+                plot_y = i_target * (q_target ** 2)
+                y_label = "I · q²"
+
+            fig_1d.add_trace(go.Scatter(x=plot_x, y=plot_y, mode="markers", name="Input", marker=dict(color="royalblue", size=4)))
+            fit_arr = np.asarray(analysis_res.get("I_fit", []), dtype=float)
+            if fit_arr.ndim == 1 and len(fit_arr) == len(q_target):
+                fit_x, fit_y = q_target, fit_arr
+                if plot_type == "Guinier":
+                    fit_x = q_target ** 2
+                    fit_y = np.log(np.maximum(fit_y, 1e-9))
+                elif plot_type == "Porod":
+                    fit_y = fit_y * (q_target ** 4)
+                elif plot_type == "Kratky":
+                    fit_y = fit_y * (q_target ** 2)
+                fig_1d.add_trace(go.Scatter(x=fit_x, y=fit_y, mode="lines", name="Recovered Fit", line=dict(color="orange", dash="dash", width=2)))
+
+            fig_1d.update_layout(
+                title="1D Profile Analysis",
+                xaxis_title=x_label,
+                yaxis_title=y_label,
+                xaxis_type=x_type,
+                yaxis_type=y_type,
+                width=500,
+                height=400,
+                margin=dict(l=30, r=30, t=40, b=30),
             )
+            st.plotly_chart(fig_1d, use_container_width=True)
 
-    with c4:
-        st.markdown("**Recovered Distribution**")
-        fig_dist = go.Figure()
-        # Input PDF (dashed gray)
-        fig_dist.add_trace(go.Scatter(x=r_vals, y=pdf_vals, mode='lines', name=input_label, line=dict(color='gray', dash='dash')))
-        
-        rec_dists_dl = {}
-        if analysis_method == 'Tomchuk':
-            mean_r_pdi = analysis_res.get('mean_r_rec_pdi', 0)
-            if mean_r_pdi > 0:
-                pdf_rec_pdi = get_distribution(dist_type, r_vals, mean_r_pdi, analysis_res.get('p_rec_pdi', 0))
-                fig_dist.add_trace(go.Scatter(x=r_vals, y=pdf_rec_pdi, mode='lines', name='PDI Rec.', line=dict(color='blue')))
-                rec_dists_dl['pdi'] = pdf_rec_pdi
-            
-            mean_r_pdi2 = analysis_res.get('mean_r_rec_pdi2', 0)
-            if mean_r_pdi2 > 0:
-                pdf_rec_pdi2 = get_distribution(dist_type, r_vals, mean_r_pdi2, analysis_res.get('p_rec_pdi2', 0))
-                fig_dist.add_trace(go.Scatter(x=r_vals, y=pdf_rec_pdi2, mode='lines', name='PDI2 Rec.', line=dict(color='purple')))
-                rec_dists_dl['pdi2'] = pdf_rec_pdi2
-        else:
-            if 'nnls_r' in analysis_res:
-                fig_dist.add_trace(go.Scatter(x=analysis_res['nnls_r'], y=analysis_res.get('nnls_pdf', analysis_res['nnls_w']), mode='none', fill='tozeroy', name='NNLS Rec.', fillcolor='rgba(255, 165, 0, 0.5)', line=dict(color='orange')))
-                rec_dists_dl['nnls_r'] = analysis_res['nnls_r']
-                rec_dists_dl['nnls_pdf'] = analysis_res.get('nnls_pdf', analysis_res['nnls_w'])
-        
-        fig_dist.update_layout(xaxis_title="Radius (nm)", yaxis_title="Prob", width=320, height=250, margin=dict(l=25,r=25,t=20,b=25))
-        st.plotly_chart(fig_dist)
+    with tab_results:
+        c3, c4, c5, c6 = st.columns(4)
+        with c3:
+            st.markdown("**Recovered Parameters**")
+            if analysis_method == "Tomchuk":
+                st.metric("Rec. p (PDI)", f"{analysis_res.get('p_rec_pdi', 0):.3f}")
+                st.metric("Rec. p (PDI2)", f"{analysis_res.get('p_rec_pdi2', 0):.3f}")
+                st.metric("Rec. Mean Radius (PDI)", f"{analysis_res.get('mean_r_rec_pdi', 0):.2f} nm")
+                st.metric("Rec. Mean Radius (PDI2)", f"{analysis_res.get('mean_r_rec_pdi2', 0):.2f} nm")
+            elif analysis_method == "Tenor":
+                st.metric("Rec. p", f"{analysis_res.get('p_rec', 0):.3f}")
+                st.metric("Rec. Mean Rg", f"{analysis_res.get('Rg', 0):.2f} nm")
+                st.metric("Rec. Mean Radius", f"{analysis_res.get('mean_r_rec', 0):.2f} nm")
+                st.metric("Fit RelRMS", f"{analysis_res.get('rrms', 0):.4f}")
+            else:
+                rec_label = "NNLS Mean Radius" if mode_key == "Sphere" else "NNLS Mean Rg"
+                rec_value = analysis_res.get("mean_r_rec", 0) if mode_key == "Sphere" else analysis_res.get("rg_num_rec", 0)
+                st.metric(rec_label, f"{rec_value:.2f} nm")
+                st.metric("NNLS Width (p)", f"{analysis_res.get('p_rec', 0):.3f}")
+                st.metric("Fit RelRMS", f"{analysis_res.get('rrms', 0):.4f}")
 
-    # Download
-    params_dict = {'mean_rg': mean_rg, 'p_val': p_val, 'dist_type': dist_type, 'mode': mode_key, 'method': analysis_method}
-    
-    c_d1, c_d2 = st.columns(2)
-    with c_d1:
-        st.download_button("Download Intensity Data (.csv)", create_intensity_csv(get_header_string(params_dict, analysis_res), q_target, i_target, analysis_res, analysis_method), "saxs_intensity.csv", "text/csv") 
-    with c_d2:
-        st.download_button("Download Distribution Data (.csv)", create_distribution_csv(get_header_string(params_dict, analysis_res), r_vals, pdf_vals, rec_dists_dl, params_dict), "saxs_distribution.csv", "text/csv")
+        with c4:
+            st.markdown("**Extracted Values**")
+            if analysis_method == "Tomchuk":
+                st.metric("Tomchuk Path", analysis_res.get("tomchuk_extraction", "n/a"))
+            elif analysis_method == "Tenor":
+                st.metric("PSF Candidates", f"{analysis_res.get('tenor_candidate_count', 0)}")
+            _render_extracted_table(analysis_res, analysis_method, theoretical_values)
+            if theoretical_values is not None and normalization_scale != 1.0:
+                st.caption(f"Simulated 1D data was normalized by {normalization_scale:.4e} before Tomchuk analysis.")
+
+        with c5:
+            st.markdown("**Diagnostics**")
+            if analysis_method == "Tomchuk" and reconstruction_summary is not None:
+                st.caption(f"Best reconstructed fit: {reconstruction_summary['best_variant']}")
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"Variant": "PDI", "RelRMS": f"{reconstruction_summary['rrms_pdi']:.4f}", "Quality": reconstruction_summary['quality_pdi']},
+                            {"Variant": "PDI2", "RelRMS": f"{reconstruction_summary['rrms_pdi2']:.4f}", "Quality": reconstruction_summary['quality_pdi2']},
+                        ]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+            elif analysis_method == "Tenor":
+                st.metric("Weighted Variance", f"{analysis_res.get('weighted_v', 0):.4f}")
+                st.metric("Raw g1/g0", f"{analysis_res.get('tenor_raw_g1_over_g0', 0):.2e}")
+                st.metric("Dimensionless J_G", f"{analysis_res.get('tenor_dimless_jg', 0):.2e}")
+            else:
+                st.caption("NNLS diagnostics are represented mainly by the fit error and recovered distribution.")
+
+            if sanity_summary is not None:
+                st.metric("Sanity", "PASS" if sanity_summary.get("Sanity_Pass") else "CHECK")
+                st.caption(f"Failures: {sanity_summary.get('Sanity_Failures', 'none')}")
+                st.caption(sanity_summary.get("Sanity_Suggestions", ""))
+            elif use_experimental:
+                st.caption("Sanity checks require simulated ground truth.")
+
+            if recommendation:
+                best = recommendation.get("best")
+                safety = recommendation.get("safety_zone")
+                if best:
+                    st.caption(
+                        f"Best q_max={best['q_max']:.2f}, bins={best['n_bins']}, "
+                        f"max abs p error={best['max_abs_err']:.3f}"
+                    )
+                if safety:
+                    st.caption(
+                        f"Safety zone q_max={safety['q_max_min']:.2f}-{safety['q_max_max']:.2f}, "
+                        f"bins={safety['n_bins_min']}-{safety['n_bins_max']}"
+                    )
+
+        with c6:
+            st.markdown("**Recovered Distribution**")
+            fig_dist = go.Figure()
+            fig_dist.add_trace(go.Scatter(x=r_vals, y=pdf_vals, mode="lines", name="Input", line=dict(color="gray", dash="dash")))
+            rec_dists_dl = {}
+            if analysis_method == "Tomchuk":
+                mean_r_pdi = analysis_res.get("mean_r_rec_pdi", 0)
+                mean_r_pdi2 = analysis_res.get("mean_r_rec_pdi2", 0)
+                if mean_r_pdi > 0:
+                    pdf_rec_pdi = get_distribution(dist_type, r_vals, mean_r_pdi, analysis_res.get("p_rec_pdi", 0))
+                    rec_dists_dl["pdi"] = pdf_rec_pdi
+                    fig_dist.add_trace(go.Scatter(x=r_vals, y=pdf_rec_pdi, mode="lines", name="PDI Rec.", line=dict(color="blue")))
+                if mean_r_pdi2 > 0:
+                    pdf_rec_pdi2 = get_distribution(dist_type, r_vals, mean_r_pdi2, analysis_res.get("p_rec_pdi2", 0))
+                    rec_dists_dl["pdi2"] = pdf_rec_pdi2
+                    fig_dist.add_trace(go.Scatter(x=r_vals, y=pdf_rec_pdi2, mode="lines", name="PDI2 Rec.", line=dict(color="purple")))
+            elif analysis_method == "Tenor":
+                mean_r_tenor = analysis_res.get("mean_r_rec", 0)
+                if mean_r_tenor > 0:
+                    pdf_tenor = get_distribution(dist_type, r_vals, mean_r_tenor, analysis_res.get("p_rec", 0))
+                    rec_dists_dl["tenor"] = pdf_tenor
+                    fig_dist.add_trace(go.Scatter(x=r_vals, y=pdf_tenor, mode="lines", name="Tenor Rec.", line=dict(color="crimson")))
+            elif "nnls_r" in analysis_res:
+                rec_dists_dl["nnls_r"] = analysis_res["nnls_r"]
+                rec_dists_dl["nnls_pdf"] = analysis_res.get("nnls_pdf", analysis_res.get("nnls_w", []))
+                fig_dist.add_trace(
+                    go.Scatter(
+                        x=analysis_res["nnls_r"],
+                        y=rec_dists_dl["nnls_pdf"],
+                        mode="none",
+                        fill="tozeroy",
+                        name="NNLS Rec.",
+                        fillcolor="rgba(255,165,0,0.5)",
+                        line=dict(color="orange"),
+                    )
+                )
+            fig_dist.update_layout(xaxis_title="Radius (nm)", yaxis_title="Prob", width=350, height=300, margin=dict(l=25, r=25, t=20, b=25))
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+            params_dict = {
+                "mean_rg": mean_rg,
+                "p_val": p_val,
+                "dist_type": dist_type,
+                "mode": mode_key,
+                "method": analysis_method,
+            }
+            st.download_button(
+                "Download Intensity Data (.csv)",
+                create_intensity_csv(get_header_string(params_dict, analysis_res), q_target, i_target, analysis_res, analysis_method),
+                "saxs_intensity.csv",
+                "text/csv",
+            )
+            st.download_button(
+                "Download Distribution Data (.csv)",
+                create_distribution_csv(get_header_string(params_dict, analysis_res), r_vals, pdf_vals, rec_dists_dl, params_dict),
+                "saxs_distribution.csv",
+                "text/csv",
+            )
