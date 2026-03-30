@@ -318,6 +318,8 @@ def calibrate_p_from_simulation(
 
     rows = []
     for p_val in p_grid:
+        # Section 4, step 4(a): create ground-truth simulations at different
+        # variances using the same particle form factor and the selected PSF pair.
         params = {
             "mean_rg": float(mean_rg_ref),
             "p_val": float(p_val),
@@ -366,6 +368,8 @@ def calibrate_p_from_simulation(
     if len(rows) < 4:
         return None
 
+    # Section 4, step 4(b): interpolate the calibration curve to recover the
+    # variance / distribution width that reproduces the measured observable.
     rows = sorted(rows, key=lambda row: row["dimless_jg"])
     j_vals = np.array([row["dimless_jg"] for row in rows], dtype=float)
     p_vals = np.array([row["p_val"] for row in rows], dtype=float)
@@ -408,6 +412,8 @@ def analyze_tenor_saxs_2d(
     if psf_pairs is None:
         psf_pairs = build_default_psf_pairs()
 
+    # Section 4, step 2: perform a Guinier analysis of the 2D data after
+    # reducing it to the same radial 1D profile used elsewhere in the app.
     guinier = apparent_rg_from_2d(
         i_2d,
         q_max=q_max,
@@ -418,6 +424,12 @@ def analyze_tenor_saxs_2d(
     if not guinier["valid"] or rg_app <= 0:
         raise ValueError("Could not extract an apparent Guinier radius from the 2D data.")
 
+    # Section 4, step 3(a-d):
+    #   - scan candidate anisotropic PSF quartets,
+    #   - digitally smear the image twice,
+    #   - fit log-ratio maps to a(q) + b(q) cos(2 chi),
+    #   - convert the fitted G(q) polynomial to the observable and keep the
+    #     best-scoring quartet.
     candidates = []
     for pair in psf_pairs:
         obs = extract_pair_observables(
@@ -436,6 +448,9 @@ def analyze_tenor_saxs_2d(
 
     best = min(candidates, key=lambda item: item["score"])
     observable_dimless_jg = best["dimless_jg"]
+
+    # Section 4, step 4: calibrate the selected observable against forward
+    # simulations of the same form-factor family and PSF quartet.
     calibration = calibrate_p_from_simulation(
         target_j_g=observable_dimless_jg,
         dist_type=dist_type,
@@ -456,6 +471,9 @@ def analyze_tenor_saxs_2d(
     else:
         v_weighted = float(calibration["weighted_v"])
         p_rec = float(calibration["p_rec"])
+
+    # Section 4 closing step: convert the weighted Guinier size back to the
+    # reported arithmetic-mean ensemble size once the variance is known.
     r0_weighted = rg_app / math.sqrt(max(1.0 + v_weighted, 1e-12))
     mean_ratio = weighted_mean_to_arithmetic_mean_ratio(p_rec, dist_type)
     mean_rg = r0_weighted / mean_ratio if mean_ratio > 0 else r0_weighted
