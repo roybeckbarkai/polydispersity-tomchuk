@@ -10,6 +10,7 @@ from scipy.ndimage import gaussian_filter
 from scipy.special import erf, gammaln
 import pandas as pd
 from sim_utils import nCr, double_factorial, sphere_form_factor, debye_form_factor, get_distribution, run_simulation_core
+from app_settings import build_tenor_p_grid
 
 # Tomchuk's analytic Q and lc expressions [equations (8a) and (8b)]
 # contain two numerical integrals over the error-function crossover term.
@@ -409,13 +410,13 @@ def extract_tomchuk_parameters(q_exp, i_exp, initial_rg_guess):
         'fit_res': fit_res,
     }
 
-def recover_distribution_nnls(q_exp, i_exp, q_min, q_max, kernel_func, max_rg_basis):
+def recover_distribution_nnls(q_exp, i_exp, q_min, q_max, kernel_func, max_rg_basis, n_basis=150, smooth_sigma=1.0):
     if q_min <= 0: q_min_eff = 1e-3
     else: q_min_eff = q_min
     
     r_min_basis = max(0.5, 0.5 / q_max)
     r_max_basis = max_rg_basis
-    n_basis = 150
+    n_basis = max(int(n_basis), 20)
     r_basis = np.logspace(np.log10(r_min_basis), np.log10(r_max_basis), n_basis)
     
     A = kernel_func(q_exp, r_basis)
@@ -432,7 +433,7 @@ def recover_distribution_nnls(q_exp, i_exp, q_min, q_max, kernel_func, max_rg_ba
     std = np.sqrt(var)
     p_rec = std / mean_val if mean_val > 0 else 0
     
-    weights_smooth = gaussian_filter(weights, sigma=1.0)
+    weights_smooth = gaussian_filter(weights, sigma=max(float(smooth_sigma), 0.0))
     pdf_nnls = weights_smooth.copy()
     area = trapezoid(pdf_nnls, r_basis)
     if area > 0: pdf_nnls /= area
@@ -468,7 +469,8 @@ def calculate_fit_and_rrms(q_exp, i_exp, r_vals, pdf_vals, kernel_func):
 
     return i_fit, float(rrms)
 
-def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, method, max_rg_nnls):
+def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, method, max_rg_nnls, i_2d=None, analysis_settings=None):
+    analysis_settings = {} if analysis_settings is None else analysis_settings
     results = {
         'Rg': 0, 'G': 0, 'B': 0, 'Q': 0, 'lc': 0,
         'Rg_guinier': 0, 'G_guinier': 0,
@@ -480,6 +482,7 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
         'I_fit_pdi': [], 'I_fit_pdi2': [], 'I_fit': [], 'I_fit_unified': [],
         'rrms_pdi': 0, 'rrms_pdi2': 0, 'rrms': 0,
         'tomchuk_extraction': 'none',
+        'tenor_candidate_count': 0,
     }
     
     if len(q_exp) < 5: return results
@@ -558,7 +561,16 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             results['rrms'] = rrms_pdi
             
         elif method == 'NNLS':
-            r_nnls, w_nnls, pdf_nnls, mean_r_nnls, p_nnls, i_fit_global = recover_distribution_nnls(q_exp, i_exp, q_exp[0], q_exp[-1], sphere_form_factor, max_rg_basis=max_rg_nnls)
+            r_nnls, w_nnls, pdf_nnls, mean_r_nnls, p_nnls, i_fit_global = recover_distribution_nnls(
+                q_exp,
+                i_exp,
+                q_exp[0],
+                q_exp[-1],
+                sphere_form_factor,
+                max_rg_basis=max_rg_nnls,
+                n_basis=analysis_settings.get('nnls_basis_count', 150),
+                smooth_sigma=analysis_settings.get('nnls_smooth_sigma', 1.0),
+            )
             results['rg_num_rec'] = mean_r_nnls * np.sqrt(3.0/5.0)
             results['mean_r_rec'] = mean_r_nnls
             results['p_rec'] = p_nnls
@@ -571,9 +583,71 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             denom = np.maximum(np.abs(i_exp), np.max(np.abs(i_exp)) * 1e-12 if len(i_exp) > 0 else 1.0)
             rel_residual = (i_exp - i_fit_global) / denom
             results['rrms'] = float(np.sqrt(np.mean(rel_residual ** 2)))
+        elif method == 'Tenor':
+            if i_2d is None:
+                raise ValueError("TENOR-SAXS requires a 2D detector image.")
+            from tenor_saxs import analyze_tenor_saxs_2d, build_default_psf_pairs
+            psf_pairs = build_default_psf_pairs(
+                sigma_x_start=analysis_settings.get('tenor_psf_sigma_x_start', 1.2),
+                sigma_y_start=analysis_settings.get('tenor_psf_sigma_y_start', 0.6),
+                sigma_step=analysis_settings.get('tenor_psf_sigma_step', 0.4),
+                pair_count=analysis_settings.get('tenor_psf_count', 5),
+                secondary_ratio=analysis_settings.get('tenor_psf_secondary_ratio', 0.5),
+            )
+            tenor = analyze_tenor_saxs_2d(
+                i_2d=i_2d,
+                q_max=float(analysis_settings.get('q_max_for_tenor', q_exp[-1] if len(q_exp) > 0 else 1.0)),
+                dist_type=dist_type,
+                initial_rg_guess=initial_rg_guess,
+                psf_pairs=psf_pairs,
+                n_radial_bins=int(analysis_settings.get('tenor_radial_bins', 18)),
+                qrg_limit=float(analysis_settings.get('tenor_qrg_limit', 0.85)),
+                guinier_bins=int(analysis_settings.get('tenor_guinier_bins', 256)),
+                calibration_p_grid=build_tenor_p_grid(analysis_settings),
+                psf_truncate=float(analysis_settings.get('tenor_psf_truncate', 4.0)),
+                use_m3=bool(analysis_settings.get('tenor_use_m3', True)),
+                use_g3=bool(analysis_settings.get('tenor_use_g3', True)),
+            )
+            results['Rg'] = tenor['mean_rg_rec']
+            results['G'] = tenor['g_app']
+            results['Rg_guinier'] = tenor['rg_app']
+            results['G_guinier'] = tenor['g_app']
+            results['p_rec'] = tenor['p_rec']
+            results['rg_num_rec'] = tenor['mean_rg_rec']
+            results['mean_r_rec'] = tenor['mean_r_rec']
+            results['weighted_v'] = tenor['weighted_v']
+            results['tenor_raw_g1_over_g0'] = tenor['observable_raw_g1_over_g0']
+            results['tenor_raw_g100_ratio'] = tenor['observable_raw_g100_ratio']
+            results['tenor_raw_g210_ratio'] = tenor['observable_raw_g210_ratio']
+            results['tenor_dimless_jg'] = tenor['observable_dimless_jg']
+            results['tenor_raw_m210_ratio'] = tenor['observable_raw_m210_ratio']
+            results['tenor_raw_m1_over_m0'] = tenor['observable_raw_m1_over_m0']
+            results['tenor_candidate_count'] = tenor['candidate_count']
+            results['tenor_best_psf_pair'] = tenor['best_psf_pair']
+            results['tenor_g_rmse'] = tenor['best_g_rmse']
+            results['tenor_m_rmse'] = tenor['best_m_rmse']
+            results['method'] = 'Tenor'
+            r_sim = np.linspace(
+                max(0.1, tenor['mean_r_rec'] * 0.1),
+                max(tenor['mean_r_rec'] * 5.0, 1.0),
+                max(int(analysis_settings.get('radius_samples', 400)), 50),
+            )
+            pdf_sim = get_distribution(dist_type, r_sim, tenor['mean_r_rec'], tenor['p_rec'])
+            i_fit_global, rrms = calculate_fit_and_rrms(q_exp, i_exp, r_sim, pdf_sim, sphere_form_factor)
+            results['I_fit'] = i_fit_global
+            results['rrms'] = rrms
 
     elif mode == 'IDP':
-        r_nnls, w_nnls, pdf_nnls, mean_rg_nnls, p_nnls, i_fit_global = recover_distribution_nnls(q_exp, i_exp, q_exp[0], q_exp[-1], debye_form_factor, max_rg_basis=max_rg_nnls)
+        r_nnls, w_nnls, pdf_nnls, mean_rg_nnls, p_nnls, i_fit_global = recover_distribution_nnls(
+            q_exp,
+            i_exp,
+            q_exp[0],
+            q_exp[-1],
+            debye_form_factor,
+            max_rg_basis=max_rg_nnls,
+            n_basis=analysis_settings.get('nnls_basis_count', 150),
+            smooth_sigma=analysis_settings.get('nnls_smooth_sigma', 1.0),
+        )
         results['p_rec'] = p_nnls
         results['rg_num_rec'] = mean_rg_nnls
         results['nnls_r'] = r_nnls
@@ -621,6 +695,18 @@ def get_header_string(params, analysis_res):
             f"#   Recovered Mean Radius (from PDI2): {analysis_res.get('mean_r_rec_pdi2', 0):.6f} nm",
             f"#   Fit RelRMS (PDI2): {analysis_res.get('rrms_pdi2', 0):.6f}",
         ])
+    elif params['method'] == 'Tenor':
+        header_lines.extend([
+            f"#   Rg (Apparent Guinier): {analysis_res.get('Rg_guinier', 0):.6f} nm",
+            f"#   Mean Rg (Recovered): {analysis_res.get('Rg', 0):.6f} nm",
+            f"#   Mean Radius (Recovered): {analysis_res.get('mean_r_rec', 0):.6f} nm",
+            f"#   Recovered p: {analysis_res.get('p_rec', 0):.6f}",
+            f"#   Weighted Variance: {analysis_res.get('weighted_v', 0):.6f}",
+            f"#   Raw g1/g0: {analysis_res.get('tenor_raw_g1_over_g0', 0):.6e}",
+            f"#   Dimensionless J_G: {analysis_res.get('tenor_dimless_jg', 0):.6e}",
+            f"#   Candidate PSF Pairs: {analysis_res.get('tenor_candidate_count', 0)}",
+            f"#   Fit RelRMS: {analysis_res.get('rrms', 0):.6f}",
+        ])
     else: # NNLS
         header_lines.extend([
             f"#   Recovered Mean Radius: {analysis_res.get('mean_r_rec', 0):.6f} nm" if params['mode'] == 'Sphere' else f"#   Recovered Rg (Mean): {analysis_res.get('rg_num_rec', 0):.6f} nm",
@@ -641,7 +727,8 @@ def create_intensity_csv(header, q, i_input, analysis_res, method):
             df['I_Fit_PDI2'] = analysis_res['I_fit_pdi2']
     else:
         if len(analysis_res.get('I_fit', [])) == len(q):
-            df['I_Fit_NNLS'] = analysis_res['I_fit']
+            fit_label = 'I_Fit_Tenor' if method == 'Tenor' else 'I_Fit_NNLS'
+            df[fit_label] = analysis_res['I_fit']
             
     return header + df.to_csv(index=False)
 
@@ -656,6 +743,9 @@ def create_distribution_csv(header, r, input_dist, recovered_dists, params):
             df['PDI_Recovered_PDF'] = recovered_dists['pdi']
         if 'pdi2' in recovered_dists:
             df['PDI2_Recovered_PDF'] = recovered_dists['pdi2']
+    elif params['method'] == 'Tenor':
+        if 'tenor' in recovered_dists:
+            df['Tenor_Recovered_PDF'] = recovered_dists['tenor']
     else: 
         if 'nnls_r' in recovered_dists and 'nnls_pdf' in recovered_dists:
              df['NNLS_Recovered_PDF'] = np.interp(r, recovered_dists['nnls_r'], recovered_dists['nnls_pdf'], left=0, right=0)
@@ -673,6 +763,8 @@ def get_recovered_size(analysis_res, params, variant='primary'):
 
     if params['method'] == 'NNLS':
         return analysis_res.get('mean_r_rec', 0)
+    if params['method'] == 'Tenor':
+        return analysis_res.get('mean_r_rec', 0)
     if variant == 'pdi2':
         return analysis_res.get('mean_r_rec_pdi2', 0)
     return analysis_res.get('mean_r_rec_pdi', 0)
@@ -687,6 +779,10 @@ def build_recovered_distributions(params, analysis_res, r_vals):
         mean_r_pdi2 = analysis_res.get('mean_r_rec_pdi2', 0)
         if mean_r_pdi2 > 0:
             recovered_dists['pdi2'] = get_distribution(params['dist_type'], r_vals, mean_r_pdi2, analysis_res.get('p_rec_pdi2', 0))
+    elif params['method'] == 'Tenor':
+        mean_r_tenor = analysis_res.get('mean_r_rec', 0)
+        if mean_r_tenor > 0:
+            recovered_dists['tenor'] = get_distribution(params['dist_type'], r_vals, mean_r_tenor, analysis_res.get('p_rec', 0))
     elif 'nnls_r' in analysis_res:
         recovered_dists['nnls_r'] = analysis_res['nnls_r']
         recovered_dists['nnls_pdf'] = analysis_res.get('nnls_pdf', analysis_res.get('nnls_w', []))
@@ -697,7 +793,7 @@ def build_summary_row(params, analysis_res, base_row=None):
     p_true = float(params['p_val'])
     true_size = get_true_size(params)
 
-    rec_p = analysis_res.get('p_rec', 0) if params['method'] == 'NNLS' else analysis_res.get('p_rec_pdi', 0)
+    rec_p = analysis_res.get('p_rec', 0) if params['method'] in ('NNLS', 'Tenor') else analysis_res.get('p_rec_pdi', 0)
     rec_size = get_recovered_size(analysis_res, params, variant='primary')
 
     summary_row.update({
@@ -935,6 +1031,8 @@ def recommend_tomchuk_settings(
     dist_type='Gaussian',
     pixels=1024,
     smearing=1.0,
+    smearing_x=None,
+    smearing_y=None,
     flux=1e12,
     noise=False,
     q_min=0.0,
@@ -944,7 +1042,13 @@ def recommend_tomchuk_settings(
     target_abs_error=0.01,
     safety_margin=0.01,
     mode='Sphere',
+    radius_samples=400,
+    q_samples=200,
 ):
+    if smearing_x is None:
+        smearing_x = smearing
+    if smearing_y is None:
+        smearing_y = smearing
     if q_max_values is None:
         q_max_values = [0.8, 1.2, 1.6, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0]
     if n_bin_values is None:
@@ -962,12 +1066,16 @@ def recommend_tomchuk_settings(
                 'q_min': float(q_min),
                 'q_max': float(q_max),
                 'n_bins': int(n_bins),
-                'smearing': float(smearing),
+                'smearing': 0.5 * (float(smearing_x) + float(smearing_y)),
+                'smearing_x': float(smearing_x),
+                'smearing_y': float(smearing_y),
                 'flux': float(flux),
                 'noise': bool(noise),
                 'binning_mode': binning_mode,
                 'method': 'Tomchuk',
                 'nnls_max_rg': float(mean_rg) * (1 + 8 * float(p_val)),
+                'radius_samples': int(radius_samples),
+                'q_samples': int(q_samples),
             }
             q_sim, i_sim, r_vals, pdf_vals, analysis_res, _ = run_simulation_analysis_case(params)
             summary = build_summary_row(params, analysis_res)
@@ -1038,9 +1146,9 @@ def recommend_tomchuk_settings(
     }
 
 def run_simulation_analysis_case(params):
-    q_sim, i_sim, _, r_vals, pdf_vals = run_simulation_core(params)
+    q_sim, i_sim, i_2d, r_vals, pdf_vals = run_simulation_core(params)
     i_for_analysis = i_sim
-    if params['mode'] == 'Sphere' and params.get('normalize_simulated', True):
+    if params['mode'] == 'Sphere' and params.get('method') == 'Tomchuk' and params.get('normalize_simulated', True):
         i_for_analysis, norm_scale = normalize_simulated_sphere_intensity(q_sim, i_sim, r_vals, pdf_vals)
     else:
         norm_scale = 1.0
@@ -1051,7 +1159,9 @@ def run_simulation_analysis_case(params):
         params['mean_rg'],
         params['mode'],
         params['method'],
-        params['nnls_max_rg']
+        params['nnls_max_rg'],
+        i_2d=i_2d,
+        analysis_settings=params,
     )
     analysis_res['simulation_normalization_scale'] = norm_scale
     recovered_dists = build_recovered_distributions(params, analysis_res, r_vals)
