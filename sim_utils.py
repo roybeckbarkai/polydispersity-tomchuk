@@ -4,6 +4,7 @@
 
 import numpy as np
 from scipy.special import gamma, factorial
+from scipy.special import j1, sici
 from scipy.ndimage import gaussian_filter
 from scipy.integrate import trapezoid
 
@@ -107,6 +108,78 @@ def debye_form_factor(q, rg):
     return val
 
 
+def shell_form_factor(q, rg):
+    q_col = q[:, np.newaxis]
+    rg_row = rg[np.newaxis, :]
+    qr = q_col * rg_row
+    with np.errstate(divide='ignore', invalid='ignore'):
+        val = (np.sin(qr) / qr) ** 2
+    return np.nan_to_num(val, nan=1.0)
+
+
+def thin_rod_form_factor(q, rg):
+    q_col = q[:, np.newaxis]
+    rg_row = rg[np.newaxis, :]
+    rod_length = np.sqrt(12.0) * rg_row
+    u = np.maximum(q_col * rod_length, 1e-12)
+    si_vals, _ = sici(u)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        val = (2.0 * si_vals / u) - (4.0 * np.sin(u / 2.0) ** 2) / (u ** 2)
+    return np.nan_to_num(val, nan=1.0, posinf=1.0, neginf=0.0)
+
+
+def thin_disk_form_factor(q, rg):
+    q_col = q[:, np.newaxis]
+    rg_row = rg[np.newaxis, :]
+    disk_radius = np.sqrt(2.0) * rg_row
+    u = np.maximum(q_col * disk_radius, 1e-12)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        val = 2.0 * (1.0 - j1(2.0 * u) / u) / (u ** 2)
+    return np.nan_to_num(val, nan=1.0, posinf=1.0, neginf=0.0)
+
+
+def guinier_curvature_form_factor(q, rg, phi2, phi3=0.0):
+    q_col = q[:, np.newaxis]
+    rg_row = rg[np.newaxis, :]
+    u = (q_col * rg_row) ** 2
+    exponent = -(u / 3.0) + 0.5 * phi2 * (u ** 2) + (phi3 / 6.0) * (u ** 3)
+    return np.exp(exponent)
+
+
+def get_form_factor_kernel(form_factor_model, phi2=0.0, phi3=0.0):
+    model = (form_factor_model or "").strip()
+    if model == "Exact Sphere":
+        return sphere_form_factor, "radius", 0.0
+    if model == "Exact Gaussian Chain":
+        return debye_form_factor, "rg", 0.0
+    if model == "Exact Shell":
+        return shell_form_factor, "rg", 4.0
+    if model == "Exact Thin Rod":
+        return thin_rod_form_factor, "rg", 2.0
+    if model == "Exact Thin Disk":
+        return thin_disk_form_factor, "rg", 4.0
+    return (lambda q, size: guinier_curvature_form_factor(q, size, phi2=phi2, phi3=phi3)), "rg", 0.0
+
+
+def sample_size_distribution(size_grid, dist_type, mean_size, p_val, ensemble_sampling="Continuous", ensemble_members=11):
+    if str(ensemble_sampling).lower().startswith("disc"):
+        ensemble_members = max(int(ensemble_members), 3)
+        indices = np.linspace(0, len(size_grid) - 1, ensemble_members).astype(int)
+        sampled_sizes = np.unique(size_grid[indices])
+        pdf_vals = get_distribution(dist_type, sampled_sizes, mean_size, p_val)
+        weights = np.asarray(pdf_vals, dtype=float)
+        weight_sum = np.sum(weights)
+        if weight_sum > 0:
+            weights = weights / weight_sum
+        return sampled_sizes, weights
+
+    pdf_vals = get_distribution(dist_type, size_grid, mean_size, p_val)
+    area = trapezoid(pdf_vals, size_grid)
+    if area > 0:
+        pdf_vals = pdf_vals / area
+    return size_grid, pdf_vals
+
+
 def build_detector_q_grid(pixels, q_max):
     q_axis = np.linspace(-q_max, q_max, pixels)
     qx, qy = np.meshgrid(q_axis, q_axis)
@@ -167,32 +240,43 @@ def run_simulation_core(params):
     binning_mode = params['binning_mode']
     r_steps = int(float(params.get('radius_samples', 400)))
     q_steps = int(float(params.get('q_samples', 200)))
+    form_factor_model = params.get('form_factor_model', 'Exact Sphere' if mode_key == 'Sphere' else 'Exact Gaussian Chain')
+    phi2 = float(params.get('phi2', (-1.0 / 63.0) if mode_key == 'Sphere' else (1.0 / 18.0)))
+    phi3 = float(params.get('phi3', 0.0))
+    ensemble_sampling = params.get('ensemble_sampling', 'Continuous')
+    ensemble_members = int(float(params.get('ensemble_members', 11)))
+    weight_power = params.get('weight_power')
 
-    mean_r = mean_rg * np.sqrt(5.0/3.0) 
-    sigma = p_val * mean_r
+    kernel_func, size_kind, default_weight_power = get_form_factor_kernel(form_factor_model, phi2=phi2, phi3=phi3)
+    if weight_power is None:
+        weight_power = default_weight_power
+    weight_power = float(weight_power)
 
-    r_min = max(0.1, mean_r - 5 * sigma)
-    r_max = mean_r + 15 * sigma
-    r_vals = np.linspace(r_min, r_max, r_steps)
-    
-    if mode_key == 'IDP':
-        r_min_idp = max(0.1, mean_rg * (1 - 5*p_val))
-        r_max_idp = mean_rg * (1 + 15*p_val)
-        r_vals = np.linspace(r_min_idp, r_max_idp, r_steps)
-        pdf_vals = get_distribution(dist_type, r_vals, mean_rg, p_val)
-    else:
-        pdf_vals = get_distribution(dist_type, r_vals, mean_r, p_val)
-
-    area = trapezoid(pdf_vals, r_vals)
-    if area > 0: pdf_vals /= area
+    mean_size = mean_rg if size_kind == "rg" else mean_rg * np.sqrt(5.0 / 3.0)
+    sigma = p_val * mean_size
+    size_min = max(0.1, mean_size - 5 * sigma)
+    size_max = mean_size + 15 * sigma
+    size_grid = np.linspace(size_min, size_max, r_steps)
+    r_vals, pdf_vals = sample_size_distribution(
+        size_grid=size_grid,
+        dist_type=dist_type,
+        mean_size=mean_size,
+        p_val=p_val,
+        ensemble_sampling=ensemble_sampling,
+        ensemble_members=ensemble_members,
+    )
 
     q_1d = np.logspace(np.log10(1e-3), np.log10(q_max * 1.5), q_steps)
 
-    if mode_key == 'Sphere':
-        i_matrix = sphere_form_factor(q_1d, r_vals) 
-        i_1d_ideal = trapezoid(i_matrix * pdf_vals, r_vals, axis=1) 
+    if str(ensemble_sampling).lower().startswith("disc"):
+        i_matrix = kernel_func(q_1d, r_vals)
+        if weight_power != 0:
+            i_matrix = i_matrix * (r_vals[np.newaxis, :] ** weight_power)
+        i_1d_ideal = np.sum(i_matrix * pdf_vals[np.newaxis, :], axis=1)
     else:
-        i_matrix = debye_form_factor(q_1d, r_vals)
+        i_matrix = kernel_func(q_1d, r_vals)
+        if weight_power != 0:
+            i_matrix = i_matrix * (r_vals[np.newaxis, :] ** weight_power)
         i_1d_ideal = trapezoid(i_matrix * pdf_vals, r_vals, axis=1)
 
     _, _, _, qv_r = build_detector_q_grid(pixels, q_max)

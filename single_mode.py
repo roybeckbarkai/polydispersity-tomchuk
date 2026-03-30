@@ -48,6 +48,12 @@ def _build_simulation_params(mode_key, dist_type, mean_rg, p_val, pixels, q_min,
         "binning_mode": binning_mode,
         "radius_samples": int(st.session_state.radius_samples),
         "q_samples": int(st.session_state.q_samples),
+        "form_factor_model": st.session_state.form_factor_model,
+        "phi2": float(st.session_state.phi2),
+        "phi3": float(st.session_state.phi3),
+        "weight_power": float(st.session_state.weight_power),
+        "ensemble_sampling": st.session_state.ensemble_sampling,
+        "ensemble_members": int(st.session_state.ensemble_members),
     }
 
 
@@ -230,6 +236,21 @@ def run():
         c18.number_input("NNLS Basis Count", min_value=20, step=10, key="nnls_basis_count")
         c19.number_input("NNLS Smooth Sigma", min_value=0.0, step=0.1, key="nnls_smooth_sigma")
         nnls_max_rg = st.number_input("NNLS Max Rg (Basis Set)", min_value=1.0, max_value=500.0, step=1.0, key="nnls_max_rg")
+        c19a, c19b, c19c = st.columns(3)
+        model_options = ["Exact Sphere", "Guinier Curvature", "Exact Gaussian Chain", "Exact Shell", "Exact Thin Rod", "Exact Thin Disk"] if mode_key == "Sphere" else ["Exact Gaussian Chain", "Guinier Curvature"]
+        current_model = st.session_state.get("form_factor_model", "Exact Sphere")
+        if current_model not in model_options:
+            current_model = model_options[0]
+            st.session_state["form_factor_model"] = current_model
+        c19a.selectbox("Forward Model", model_options, index=model_options.index(current_model), key="form_factor_model")
+        c19b.selectbox("Ensemble Sampling", ["Continuous", "Discrete"], key="ensemble_sampling")
+        c19c.number_input("Ensemble Members", min_value=3, step=1, key="ensemble_members")
+        c19d, c19e, c19f = st.columns(3)
+        c19d.number_input("phi2", step=0.001, key="phi2")
+        c19e.number_input("phi3", step=0.001, key="phi3")
+        c19f.number_input("Weight Power", step=1.0, key="weight_power")
+        if analysis_method in {"Tomchuk", "Tenor"} and st.session_state.form_factor_model != "Exact Sphere":
+            st.warning("Tomchuk and Tenor are calibrated primarily for sphere forward models; non-sphere forward models are best treated as simulation-only for now.")
 
         if mode_key == "Sphere" and analysis_method == "Tenor":
             st.subheader("Tenor-SAXS Settings")
@@ -305,7 +326,7 @@ def run():
         q_target = q_sim
         i_target = i_sim
         normalization_scale = 1.0
-        if mode_key == "Sphere" and analysis_method == "Tomchuk":
+        if mode_key == "Sphere" and analysis_method == "Tomchuk" and st.session_state.form_factor_model == "Exact Sphere":
             i_target, normalization_scale = normalize_simulated_sphere_intensity(q_target, i_target, r_vals, pdf_vals)
 
     analysis_res = perform_saxs_analysis(
@@ -324,7 +345,7 @@ def run():
     reconstruction_summary = build_reconstruction_quality_summary(analysis_res) if analysis_method == "Tomchuk" else None
     theoretical_values = None
     sanity_summary = None
-    if (not use_experimental) and mode_key == "Sphere" and analysis_method == "Tomchuk":
+    if (not use_experimental) and mode_key == "Sphere" and analysis_method == "Tomchuk" and st.session_state.form_factor_model == "Exact Sphere":
         sanity_summary = build_sanity_summary_row(q_target, i_target, r_vals, pdf_vals, analysis_res)
         theoretical_values = calculate_sphere_input_theoretical_parameters(mean_rg, p_val, dist_type)
 

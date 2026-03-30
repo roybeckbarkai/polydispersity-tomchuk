@@ -1148,7 +1148,12 @@ def recommend_tomchuk_settings(
 def run_simulation_analysis_case(params):
     q_sim, i_sim, i_2d, r_vals, pdf_vals = run_simulation_core(params)
     i_for_analysis = i_sim
-    if params['mode'] == 'Sphere' and params.get('method') == 'Tomchuk' and params.get('normalize_simulated', True):
+    if (
+        params['mode'] == 'Sphere'
+        and params.get('method') == 'Tomchuk'
+        and params.get('normalize_simulated', True)
+        and params.get('form_factor_model', 'Exact Sphere') == 'Exact Sphere'
+    ):
         i_for_analysis, norm_scale = normalize_simulated_sphere_intensity(q_sim, i_sim, r_vals, pdf_vals)
     else:
         norm_scale = 1.0
