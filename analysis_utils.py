@@ -604,6 +604,9 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
                 qrg_limit=float(analysis_settings.get('tenor_qrg_limit', 0.85)),
                 guinier_bins=int(analysis_settings.get('tenor_guinier_bins', 256)),
                 calibration_p_grid=build_tenor_p_grid(analysis_settings),
+                psf_truncate=float(analysis_settings.get('tenor_psf_truncate', 4.0)),
+                use_m3=bool(analysis_settings.get('tenor_use_m3', True)),
+                use_g3=bool(analysis_settings.get('tenor_use_g3', True)),
             )
             results['Rg'] = tenor['mean_rg_rec']
             results['G'] = tenor['g_app']
@@ -614,7 +617,10 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             results['mean_r_rec'] = tenor['mean_r_rec']
             results['weighted_v'] = tenor['weighted_v']
             results['tenor_raw_g1_over_g0'] = tenor['observable_raw_g1_over_g0']
+            results['tenor_raw_g100_ratio'] = tenor['observable_raw_g100_ratio']
+            results['tenor_raw_g210_ratio'] = tenor['observable_raw_g210_ratio']
             results['tenor_dimless_jg'] = tenor['observable_dimless_jg']
+            results['tenor_raw_m210_ratio'] = tenor['observable_raw_m210_ratio']
             results['tenor_raw_m1_over_m0'] = tenor['observable_raw_m1_over_m0']
             results['tenor_candidate_count'] = tenor['candidate_count']
             results['tenor_best_psf_pair'] = tenor['best_psf_pair']

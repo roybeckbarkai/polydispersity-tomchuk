@@ -19,6 +19,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.linalg import qr, solve_triangular
 from scipy.ndimage import gaussian_filter
 from scipy.optimize import bisect
 
@@ -177,86 +178,148 @@ def apply_anisotropic_gaussian(i_2d, sigma_x, sigma_y):
     return gaussian_filter(np.asarray(i_2d, dtype=float), sigma=(sigma_y, sigma_x))
 
 
-def fit_angular_harmonics(log_ratio_map, intensity_weights, qx, qy, q_edges):
-    """Fit a(q) + b(q) cos(2 chi) in radial bins."""
-    q_r = np.sqrt(qx**2 + qy**2)
-    chi = np.arctan2(qy, qx)
+def fit_weighted_centered_tenor_model(q_sq, chi, log_ratio, intensity_weights, use_m3=True, use_g3=True):
+    """Port of the MATLAB weighted centered fit used for TENOR observable extraction."""
+    q_sq = np.asarray(q_sq, dtype=float).ravel()
+    chi = np.asarray(chi, dtype=float).ravel()
+    log_ratio = np.asarray(log_ratio, dtype=float).ravel()
+    intensity_weights = np.asarray(intensity_weights, dtype=float).ravel()
+
     cos2 = np.cos(2.0 * chi)
-
-    q_centers = []
-    a_vals = []
-    b_vals = []
-    bin_weights = []
-
-    for q_lo, q_hi in zip(q_edges[:-1], q_edges[1:]):
-        mask = (q_r >= q_lo) & (q_r < q_hi) & np.isfinite(log_ratio_map) & np.isfinite(intensity_weights)
-        if np.count_nonzero(mask) < 30:
-            continue
-
-        y = log_ratio_map[mask]
-        x = cos2[mask]
-        w = np.sqrt(np.maximum(intensity_weights[mask], 1e-12))
-        if np.count_nonzero(np.isfinite(y)) < 30:
-            continue
-
-        design = np.column_stack([np.ones_like(x), x])
-        design_w = design * w[:, None]
-        y_w = y * w
-        try:
-            coeffs, _, _, _ = np.linalg.lstsq(design_w, y_w, rcond=None)
-        except np.linalg.LinAlgError:
-            continue
-
-        q_centers.append(0.5 * (q_lo + q_hi))
-        a_vals.append(float(coeffs[0]))
-        b_vals.append(float(coeffs[1]))
-        bin_weights.append(float(np.sum(w**2)))
-
-    return (
-        np.asarray(q_centers, dtype=float),
-        np.asarray(a_vals, dtype=float),
-        np.asarray(b_vals, dtype=float),
-        np.asarray(bin_weights, dtype=float),
+    valid = (
+        np.isfinite(q_sq)
+        & np.isfinite(cos2)
+        & np.isfinite(log_ratio)
+        & np.isfinite(intensity_weights)
+        & (intensity_weights > 0)
     )
+    if np.count_nonzero(valid) < 30:
+        return None
 
+    q_sq = q_sq[valid]
+    cos2 = cos2[valid]
+    y = log_ratio[valid]
+    w = np.sqrt(intensity_weights[valid])
+    w_sum = float(np.sum(w))
+    if w_sum <= 0:
+        return None
 
-def fit_even_polynomial(q_vals, y_vals, weights=None, degree=2):
-    """Fit y(q) = c0 + c1 q^2 + c2 q^4 + ..."""
-    q_vals = np.asarray(q_vals, dtype=float)
-    y_vals = np.asarray(y_vals, dtype=float)
-    if len(q_vals) < degree + 2:
-        raise ValueError("Not enough points to fit TENOR polynomial.")
+    mu_q = float(np.sum(w * q_sq) / w_sum)
+    q_centered = q_sq - mu_q
 
-    x = q_vals**2
-    poly = np.polyfit(x, y_vals, deg=degree, w=weights)
-    # np.polyfit returns highest-to-lowest order.
-    fitted = np.polyval(poly, x)
-    resid = y_vals - fitted
+    if use_g3:
+        g_cols = [np.ones_like(q_sq), q_centered, q_centered**2, q_centered**3]
+    else:
+        g_cols = [np.ones_like(q_sq), q_centered, q_centered**2]
+
+    if use_m3:
+        m_cols = [q_sq * cos2, (q_sq**2) * cos2, (q_sq**3) * cos2]
+    else:
+        m_cols = [q_sq * cos2, (q_sq**2) * cos2]
+
+    x = np.column_stack(g_cols + m_cols)
+    xw = x * w[:, None]
+    yw = y * w
+
+    try:
+        q_mat, r_mat = qr(xw, mode="economic")
+    except Exception:
+        return None
+
+    rank = int(np.linalg.matrix_rank(r_mat))
+    if rank < x.shape[1]:
+        coeff_centered, *_ = np.linalg.lstsq(xw, yw, rcond=None)
+        if coeff_centered.shape[0] != x.shape[1]:
+            return None
+    else:
+        coeff_centered = solve_triangular(r_mat, q_mat.T @ yw)
+
+    # Map centered G-block coefficients back to the original Q basis.
+    k_g = len(g_cols)
+    k_m = len(m_cols)
+    k_total = k_g + k_m
+    transform = np.zeros((k_total, k_total), dtype=float)
+    transform[:k_g, :k_g] = np.eye(k_g)
+    if k_g >= 3:
+        transform[0, 0] = 1.0
+        transform[0, 1] = -mu_q
+        transform[0, 2] = mu_q**2
+        transform[1, 1] = 1.0
+        transform[1, 2] = -2.0 * mu_q
+        transform[2, 2] = 1.0
+    if k_g >= 4:
+        transform[0, 3] = -(mu_q**3)
+        transform[1, 3] = 3.0 * (mu_q**2)
+        transform[2, 3] = -3.0 * mu_q
+        transform[3, 3] = 1.0
+    transform[k_g:, k_g:] = np.eye(k_m)
+    coeffs = transform @ coeff_centered
+
+    fitted = x @ coeff_centered
+    resid = y - fitted
     rmse = float(np.sqrt(np.mean(resid**2)))
-    coeffs = poly[::-1]
-    return coeffs, fitted, rmse
+
+    g_coeffs = coeffs[:k_g]
+    m_coeffs = coeffs[k_g:]
+    g0 = float(g_coeffs[0])
+    g1 = float(g_coeffs[1]) if len(g_coeffs) > 1 else np.nan
+    g2 = float(g_coeffs[2]) if len(g_coeffs) > 2 else np.nan
+    m0 = float(m_coeffs[0]) if len(m_coeffs) > 0 else np.nan
+    m1 = float(m_coeffs[1]) if len(m_coeffs) > 1 else np.nan
+
+    raw_g1_over_g0 = g1 / g0 if abs(g0) > 1e-20 else np.nan
+    g100_ratio = g1 / (g0**2) if abs(g0) > 1e-20 else np.nan
+    g210_ratio = g2 / (g1 * g0) if abs(g0 * g1) > 1e-20 else np.nan
+    m210_ratio = m1 / (m0 * g0) if abs(m0 * g0) > 1e-20 else np.nan
+
+    return {
+        "g_coeffs": g_coeffs,
+        "m_coeffs": m_coeffs,
+        "fit_rmse": rmse,
+        "q_sq": q_sq,
+        "fitted": fitted,
+        "mu_q": mu_q,
+        "raw_g1_over_g0": float(raw_g1_over_g0),
+        "raw_g100_ratio": float(g100_ratio),
+        "raw_g210_ratio": float(g210_ratio) if np.isfinite(g210_ratio) else np.nan,
+        "raw_m210_ratio": float(m210_ratio) if np.isfinite(m210_ratio) else np.nan,
+    }
 
 
-def extract_pair_observables(i_2d, q_max, pair, rg_app, qrg_limit=0.85, n_radial_bins=18):
+def extract_pair_observables(
+    i_2d,
+    q_max,
+    pair,
+    rg_app,
+    qrg_limit=0.85,
+    n_radial_bins=18,
+    psf_truncate=4.0,
+    use_m3=True,
+    use_g3=True,
+):
     pixels = i_2d.shape[0]
     dq = (2.0 * q_max) / max(pixels - 1, 1)
-    _, qx, qy, _ = build_detector_q_grid(pixels, q_max)
-    q_fit_max = min(q_max, qrg_limit / max(rg_app, 1e-6))
-    q_edges = np.linspace(dq, q_fit_max, int(n_radial_bins) + 1)
+    _, qx, qy, q_r = build_detector_q_grid(pixels, q_max)
     base_weights = np.maximum(i_2d, np.nanmax(i_2d) * 1e-12 if np.isfinite(i_2d).any() else 1e-12)
 
     img1 = apply_anisotropic_gaussian(i_2d, pair.sigma_x_1, pair.sigma_y_1)
     img2 = apply_anisotropic_gaussian(i_2d, pair.sigma_x_2, pair.sigma_y_2)
     log_ratio = np.log(np.maximum(img1, 1e-12)) - np.log(np.maximum(img2, 1e-12))
 
-    q_vals, a_vals, b_vals, fit_weights = fit_angular_harmonics(
-        log_ratio_map=log_ratio,
-        intensity_weights=base_weights,
-        qx=qx,
-        qy=qy,
-        q_edges=q_edges,
+    q_fit_max = min(q_max, qrg_limit / max(rg_app, 1e-6))
+    dead_pixels = int(
+        2
+        * max(
+            int(math.ceil(psf_truncate * pair.sigma_x_1)),
+            int(math.ceil(psf_truncate * pair.sigma_y_1)),
+            int(math.ceil(psf_truncate * pair.sigma_x_2)),
+            int(math.ceil(psf_truncate * pair.sigma_y_2)),
+            1,
+        )
     )
-    if len(q_vals) < 6:
+    q_dead = dead_pixels * abs(dq)
+    fit_mask = (q_r < min(q_fit_max, np.nanmax(q_r) - q_dead)) & (q_r > q_dead)
+    if np.count_nonzero(fit_mask) < 30:
         return None
 
     dsx2 = (pair.sigma_x_1**2 - pair.sigma_x_2**2) * (dq**2)
@@ -266,31 +329,39 @@ def extract_pair_observables(i_2d, q_max, pair, rg_app, qrg_limit=0.85, n_radial
     if abs(sigma0) < 1e-20 or abs(delta0) < 1e-20:
         return None
 
-    g_radial = 2.0 * a_vals / sigma0
-    m_radial = 2.0 * b_vals / delta0
-    g_coeffs, _, g_rmse = fit_even_polynomial(q_vals, g_radial, weights=fit_weights, degree=2)
-    m_coeffs, _, m_rmse = fit_even_polynomial(q_vals, m_radial, weights=fit_weights, degree=2)
+    fit_res = fit_weighted_centered_tenor_model(
+        q_sq=(q_r[fit_mask] ** 2),
+        chi=np.arctan2(qy[fit_mask], qx[fit_mask]),
+        log_ratio=log_ratio[fit_mask],
+        intensity_weights=base_weights[fit_mask],
+        use_m3=use_m3,
+        use_g3=use_g3,
+    )
+    if fit_res is None:
+        return None
 
+    g_coeffs = np.asarray(fit_res["g_coeffs"], dtype=float)
+    m_coeffs = np.asarray(fit_res["m_coeffs"], dtype=float)
     g0 = float(g_coeffs[0])
-    g1 = float(g_coeffs[1]) if len(g_coeffs) > 1 else 0.0
-    m0 = float(m_coeffs[0])
-    m1 = float(m_coeffs[1]) if len(m_coeffs) > 1 else 0.0
     if abs(g0) < 1e-20:
         return None
 
-    raw_g1_over_g0 = g1 / g0
-    score = abs(g_rmse) + 0.5 * abs(m_rmse)
+    raw_g1_over_g0 = float(fit_res["raw_g1_over_g0"])
+    score = abs(fit_res["fit_rmse"])
     return {
         "pair": pair,
-        "q_vals": q_vals,
-        "g_radial": g_radial,
-        "m_radial": m_radial,
+        "q_vals": np.asarray(np.sqrt(fit_res["q_sq"]), dtype=float),
+        "g_radial": np.asarray([], dtype=float),
+        "m_radial": np.asarray([], dtype=float),
         "g_coeffs": g_coeffs,
         "m_coeffs": m_coeffs,
-        "g_rmse": g_rmse,
-        "m_rmse": m_rmse,
+        "g_rmse": float(fit_res["fit_rmse"]),
+        "m_rmse": float(fit_res["fit_rmse"]),
         "raw_g1_over_g0": float(raw_g1_over_g0),
-        "raw_m1_over_m0": float(m1 / m0) if abs(m0) > 1e-20 else np.nan,
+        "raw_g100_ratio": float(fit_res["raw_g100_ratio"]),
+        "raw_g210_ratio": float(fit_res["raw_g210_ratio"]),
+        "raw_m210_ratio": float(fit_res["raw_m210_ratio"]),
+        "raw_m1_over_m0": float(np.nan),
         "dimless_jg": float(raw_g1_over_g0 / max(rg_app**2, 1e-12)),
         "score": float(score),
         "q_fit_max": float(q_fit_max),
@@ -354,6 +425,9 @@ def calibrate_p_from_simulation(
             rg_app=guinier["rg_app"],
             qrg_limit=float((tenor_settings or {}).get("tenor_qrg_limit", 0.85)),
             n_radial_bins=int((tenor_settings or {}).get("tenor_radial_bins", 18)),
+            psf_truncate=float((tenor_settings or {}).get("tenor_psf_truncate", 4.0)),
+            use_m3=bool((tenor_settings or {}).get("tenor_use_m3", True)),
+            use_g3=bool((tenor_settings or {}).get("tenor_use_g3", True)),
         )
         if obs is None:
             continue
@@ -403,6 +477,9 @@ def analyze_tenor_saxs_2d(
     qrg_limit=0.85,
     guinier_bins=256,
     calibration_p_grid=None,
+    psf_truncate=4.0,
+    use_m3=True,
+    use_g3=True,
 ):
     """Estimate mean Rg and p from a 2D pattern using the TENOR-SAXS recipe."""
     i_2d = np.asarray(i_2d, dtype=float)
@@ -439,6 +516,9 @@ def analyze_tenor_saxs_2d(
             rg_app=rg_app,
             qrg_limit=qrg_limit,
             n_radial_bins=n_radial_bins,
+            psf_truncate=psf_truncate,
+            use_m3=use_m3,
+            use_g3=use_g3,
         )
         if obs is not None:
             candidates.append(obs)
@@ -463,6 +543,9 @@ def analyze_tenor_saxs_2d(
             "tenor_guinier_bins": guinier_bins,
             "tenor_qrg_limit": qrg_limit,
             "tenor_radial_bins": n_radial_bins,
+            "tenor_psf_truncate": psf_truncate,
+            "tenor_use_m3": use_m3,
+            "tenor_use_g3": use_g3,
         },
     )
     if calibration is None:
@@ -491,7 +574,10 @@ def analyze_tenor_saxs_2d(
         "mean_r_rec": float(mean_radius),
         "weighted_mean_rg": float(r0_weighted),
         "observable_raw_g1_over_g0": float(best["raw_g1_over_g0"]),
+        "observable_raw_g100_ratio": float(best["raw_g100_ratio"]),
+        "observable_raw_g210_ratio": float(best["raw_g210_ratio"]),
         "observable_dimless_jg": float(observable_dimless_jg),
+        "observable_raw_m210_ratio": float(best["raw_m210_ratio"]),
         "observable_raw_m1_over_m0": float(best["raw_m1_over_m0"]),
         "best_psf_pair": best["pair"],
         "best_g_rmse": float(best["g_rmse"]),

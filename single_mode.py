@@ -243,10 +243,14 @@ def run():
             c25.number_input("TENOR PSF SigmaY Start", min_value=0.1, step=0.1, key="tenor_psf_sigma_y_start")
             c26.number_input("TENOR PSF Sigma Step", min_value=0.05, step=0.05, key="tenor_psf_sigma_step")
             c27.number_input("TENOR Secondary Ratio", min_value=0.1, max_value=1.0, step=0.05, key="tenor_psf_secondary_ratio")
-            c28, c29, c30 = st.columns(3)
-            c28.number_input("TENOR p Min", min_value=0.001, step=0.01, key="tenor_calibration_p_min")
-            c29.number_input("TENOR p Max", min_value=0.01, step=0.01, key="tenor_calibration_p_max")
-            c30.number_input("TENOR Calibration Points", min_value=4, step=1, key="tenor_calibration_p_count")
+            c28, c29, c30, c31 = st.columns(4)
+            c28.number_input("TENOR PSF Truncate", min_value=1.0, step=0.5, key="tenor_psf_truncate")
+            c29.number_input("TENOR p Min", min_value=0.001, step=0.01, key="tenor_calibration_p_min")
+            c30.number_input("TENOR p Max", min_value=0.01, step=0.01, key="tenor_calibration_p_max")
+            c31.number_input("TENOR Calibration Points", min_value=4, step=1, key="tenor_calibration_p_count")
+            st.checkbox("TENOR Use Cubic G/M", value=st.session_state.tenor_use_g3 and st.session_state.tenor_use_m3, key="tenor_use_cubic_both")
+            st.session_state["tenor_use_g3"] = bool(st.session_state.get("tenor_use_cubic_both", True))
+            st.session_state["tenor_use_m3"] = bool(st.session_state.get("tenor_use_cubic_both", True))
 
         if mode_key == "Sphere" and analysis_method == "Tomchuk":
             st.subheader("Tomchuk Evaluator")
@@ -445,6 +449,7 @@ def run():
             elif analysis_method == "Tenor":
                 st.metric("Weighted Variance", f"{analysis_res.get('weighted_v', 0):.4f}")
                 st.metric("Raw g1/g0", f"{analysis_res.get('tenor_raw_g1_over_g0', 0):.2e}")
+                st.metric("Raw g1/g0^2", f"{analysis_res.get('tenor_raw_g100_ratio', 0):.2e}")
                 st.metric("Dimensionless J_G", f"{analysis_res.get('tenor_dimless_jg', 0):.2e}")
             else:
                 st.caption("NNLS diagnostics are represented mainly by the fit error and recovered distribution.")
