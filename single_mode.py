@@ -90,11 +90,12 @@ def run():
     binning_mode = st.sidebar.selectbox("Binning Mode", ["Logarithmic", "Linear"], key='binning_mode')
     smearing = st.sidebar.number_input("Smearing (px)", value=2.0, step=0.5, key='smearing')
 
-    st.sidebar.header("Flux & Noise")
+    st.sidebar.header("Forward Pixel Photons & Noise")
     c_f1, c_f2 = st.sidebar.columns(2)
-    with c_f1: flux_pre = st.number_input("Flux Coeff", 0.1, 9.9, 1.0, 0.1, key='flux_pre')
-    with c_f2: flux_exp = st.number_input("Flux Exp", 1, 15, 6, 1, key='flux_exp')
-    optimal_flux = st.sidebar.checkbox("Optimal Flux (No Noise)", value=False, key='optimal_flux')
+    with c_f1: flux_pre = st.number_input("Forward Coeff", 0.1, 9.9, 1.0, 0.1, key='flux_pre')
+    with c_f2: flux_exp = st.number_input("Forward Exp", 1, 15, 6, 1, key='flux_exp')
+    st.sidebar.caption("Target expected photons in the nearest-to-center detector pixel before Poisson noise.")
+    optimal_flux = st.sidebar.checkbox("Deterministic Counts (No Noise)", value=False, key='optimal_flux')
     add_noise = st.sidebar.checkbox("Simulate Poisson Noise", value=True, disabled=optimal_flux, key='add_noise')
 
     recommendation = None
@@ -216,7 +217,8 @@ def run():
             fig_1d.add_trace(go.Scatter(x=fit_x, y=fit_y, mode='lines', name='Global Fit', line=dict(color='orange', dash='dash', width=2)))
 
         if plot_type == "Guinier":
-            rg_f, g_f = analysis_res['Rg'], analysis_res['G']
+            rg_f = analysis_res.get('Rg_guinier', analysis_res['Rg'])
+            g_f = analysis_res.get('G_guinier', analysis_res['G'])
             if rg_f > 0:
                 x_line = np.linspace(0, (1.2/rg_f)**2, 50)
                 y_line = np.log(g_f) - (rg_f**2/3.0)*x_line
@@ -260,6 +262,15 @@ def run():
         rel_err_list = ["n/a", "n/a"]
         param_list = ["Rg (Extracted)", "G"]
         if analysis_method == 'Tomchuk':
+            val_list = [
+                f"{analysis_res.get('Rg_guinier', analysis_res.get('Rg', 0)):.2f} nm",
+                f"{analysis_res.get('G_guinier', analysis_res.get('G', 0)):.2e}",
+                f"{analysis_res.get('Rg', 0):.2f} nm",
+                f"{analysis_res.get('G', 0):.2e}",
+            ]
+            theory_list = ["n/a", "n/a", "n/a", "n/a"]
+            rel_err_list = ["n/a", "n/a", "n/a", "n/a"]
+            param_list = ["Rg (Guinier)", "G (Guinier)", "Rg (Selected)", "G (Selected)"]
             val_list.extend([
                 f"{analysis_res.get('Q', 0):.2e}",
                 f"{analysis_res.get('lc', 0):.2f} nm",
@@ -272,6 +283,8 @@ def run():
             param_list.extend(["Q", "lc", "B", "PDI", "PDI2"])
             if theoretical_values is not None:
                 extracted_numeric = [
+                    analysis_res.get('Rg_guinier', analysis_res.get('Rg', 0)),
+                    analysis_res.get('G_guinier', analysis_res.get('G', 0)),
                     analysis_res.get('Rg', 0),
                     analysis_res.get('G', 0),
                     analysis_res.get('Q', 0),
@@ -283,6 +296,8 @@ def run():
                 theory_numeric = [
                     theoretical_values.get('Rg', 0),
                     theoretical_values.get('G', 0),
+                    theoretical_values.get('Rg', 0),
+                    theoretical_values.get('G', 0),
                     theoretical_values.get('Q', 0),
                     theoretical_values.get('lc', 0),
                     theoretical_values.get('B', 0),
@@ -292,11 +307,13 @@ def run():
                 theory_list = [
                     f"{theory_numeric[0]:.2f} nm",
                     f"{theory_numeric[1]:.2e}",
-                    f"{theory_numeric[2]:.2e}",
-                    f"{theory_numeric[3]:.2f} nm",
+                    f"{theory_numeric[2]:.2f} nm",
+                    f"{theory_numeric[3]:.2e}",
                     f"{theory_numeric[4]:.2e}",
-                    f"{theory_numeric[5]:.4f}",
-                    f"{theory_numeric[6]:.4f}",
+                    f"{theory_numeric[5]:.2f} nm",
+                    f"{theory_numeric[6]:.2e}",
+                    f"{theory_numeric[7]:.4f}",
+                    f"{theory_numeric[8]:.4f}",
                 ]
                 rel_err_list = []
                 for extracted_val, theory_val in zip(extracted_numeric, theory_numeric):

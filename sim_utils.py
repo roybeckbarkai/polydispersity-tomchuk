@@ -163,8 +163,15 @@ def run_simulation_core(params):
     else:
         i_2d_smeared = i_2d_ideal
 
-    total_int = np.sum(i_2d_smeared)
-    scale_factor = flux / total_int if total_int > 0 else 1.0
+    # The GUI and benchmark now define "flux" as the expected number of photons
+    # in the nearest-to-center detector pixel after smearing and before Poisson
+    # noise is applied. For even detector sizes there is no exact q = 0 pixel, so
+    # we use the conventional center index (pixels // 2, pixels // 2), which is
+    # one of the four pixels closest to the beam center.
+    cy = pixels // 2
+    cx = pixels // 2
+    center_int = float(i_2d_smeared[cy, cx])
+    scale_factor = flux / center_int if center_int > 0 else 1.0
     i_2d_scaled = i_2d_smeared * scale_factor
 
     if noise:

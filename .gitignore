@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+study_outputs/
+study_outputs_test/
+study_outputs_test2/
+study_outputs_test3/
+study_outputs_test4/

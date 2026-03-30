@@ -11,6 +11,8 @@ from scipy.special import erf, gammaln
 import pandas as pd
 from sim_utils import nCr, double_factorial, sphere_form_factor, debye_form_factor, get_distribution, run_simulation_core
 
+# Tomchuk's analytic Q and lc expressions [equations (8a) and (8b)]
+# contain two numerical integrals over the error-function crossover term.
 TOMCHUK_C1 = 0.771965
 TOMCHUK_C2 = 0.319739
 
@@ -93,6 +95,10 @@ def get_normalized_moment(k, p, dist_type):
     return 1.0 
 
 def calculate_indices_from_p(p, dist_type):
+    # Tomchuk's two dimensionless width indices are defined from normalized
+    # moments of the size distribution:
+    #   PDI  = <R^2><R^8>^2 / <R^6>^3   [paper equation (4)]
+    #   PDI2 = <R^2><R^4>   / <R^3>^2   [paper equation (21)]
     m2 = get_normalized_moment(2, p, dist_type)
     m3 = get_normalized_moment(3, p, dist_type)
     m4 = get_normalized_moment(4, p, dist_type)
@@ -105,6 +111,8 @@ def calculate_indices_from_p(p, dist_type):
 
 def solve_p_tomchuk(target_val, index_type, dist_type):
     if target_val is None or target_val < 1.0001: return 0.0
+    # The paper uses family-specific PDI-p and PDI2-p relations (Fig. 4 / Table 1).
+    # Here we invert those relations numerically with a bounded scalar root solve.
     def func(p_guess):
         pdi, pdi2 = calculate_indices_from_p(p_guess, dist_type)
         return (pdi if index_type == 'PDI' else pdi2) - target_val
@@ -118,6 +126,8 @@ def solve_p_tomchuk(target_val, index_type, dist_type):
 def get_calculated_mean_radius(rg_scat, p, dist_type):
     if not rg_scat or rg_scat <= 0: return 0
     if p <= 0: return np.sqrt(5.0 / 3.0) * rg_scat
+    # For spheres, Rg depends on <R^8>/<R^6>. This implements the same
+    # moment-based back-conversion used to recover the mean size after p is known.
     m6 = get_normalized_moment(6, p, dist_type)
     m8 = get_normalized_moment(8, p, dist_type)
     if m6 <= 0 or m8 <= 0: return 0
@@ -133,6 +143,10 @@ def mean_radius_to_mean_rg(mean_radius):
     return mean_radius * np.sqrt(3.0 / 5.0)
 
 def unified_beaucage_intensity(q, G, Rg, B):
+    # Unified exponential/power-law model [Tomchuk / Beaucage equation (1)]:
+    # I(q) = G exp(-q^2 Rg^2 / 3) + B q^-4 [erf(q Rg / sqrt(6))]^12
+    # This is the core model used to obtain G, Rg and B before building
+    # the Tomchuk indices.
     q = np.asarray(q, dtype=float)
     q_safe = np.maximum(q, 1e-12)
     erf_term = erf(q_safe * Rg / np.sqrt(6.0))
@@ -151,6 +165,9 @@ def fit_unified_beaucage(q_exp, i_exp, rg_init, g_init):
     if len(q_fit) < 5:
         return None
 
+    # Initialize B from the high-q Porod region by sampling I(q) q^4 near the tail.
+    # This is an initialization heuristic for the non-linear fit, not a final Tomchuk
+    # equation from the paper.
     n_tail = max(5, min(20, len(q_fit) // 4))
     b_init = np.median(i_fit[-n_tail:] * (q_fit[-n_tail:] ** 4))
     if not np.isfinite(b_init) or b_init <= 0:
@@ -197,10 +214,21 @@ def fit_unified_beaucage(q_exp, i_exp, rg_init, g_init):
     }
 
 def estimate_guinier_parameters(q_exp, i_exp, initial_rg_guess, mode):
+    """Estimate Guinier Rg and G from the low-q region.
+
+    This is the low-q seed used before the unified fit. It corresponds to the
+    dashed Guinier term shown in Tomchuk's Fig. 1, not to one of the final
+    invariant equations. The later Tomchuk workflow may replace this raw
+    Guinier estimate with the unified-fit radius selected from the whole curve.
+    """
     if len(q_exp) < 5:
         return 0.0, 0.0, False
 
     rg_init = float(initial_rg_guess)
+    # Keep the Guinier window conservative. For spheres we stay below qRg ~ 0.9
+    # so the low-q exponential approximation remains self-consistent.
+    limit = 1.0 if mode == 'IDP' else 0.9
+    min_pts = 6
     try:
         valid_pts = (q_exp > 0) & (i_exp > 0)
         q_v = q_exp[valid_pts]
@@ -221,10 +249,9 @@ def estimate_guinier_parameters(q_exp, i_exp, initial_rg_guess, mode):
     g_fit = float(i_exp[0]) if len(i_exp) > 0 else 1.0
     valid_fit = False
     for _ in range(5):
-        limit = 1.0 if mode == 'IDP' else 0.9
         mask = (q_exp * rg_fit) < limit
         mask = mask & (q_exp > 0) & (i_exp > 0)
-        if np.sum(mask) < 4:
+        if np.sum(mask) < min_pts:
             break
         x_fit = q_exp[mask] ** 2
         y_fit = np.log(i_exp[mask])
@@ -232,7 +259,14 @@ def estimate_guinier_parameters(q_exp, i_exp, initial_rg_guess, mode):
             slope, intercept = np.polyfit(x_fit, y_fit, 1)
             if slope >= 0:
                 break
-            rg_fit = np.sqrt(np.abs(-3 * slope))
+            rg_candidate = np.sqrt(np.abs(-3 * slope))
+            if not np.isfinite(rg_candidate) or rg_candidate <= 0:
+                break
+            next_mask = (q_exp * rg_candidate) < limit
+            next_mask = next_mask & (q_exp > 0) & (i_exp > 0)
+            if np.sum(next_mask) < min_pts:
+                break
+            rg_fit = rg_candidate
             g_fit = np.exp(intercept)
             valid_fit = True
         except Exception:
@@ -241,6 +275,17 @@ def estimate_guinier_parameters(q_exp, i_exp, initial_rg_guess, mode):
     return float(rg_fit), float(g_fit), bool(valid_fit)
 
 def compute_tomchuk_analytic_quantities(G, Rg, B):
+    """Apply the paper's analytic invariant route.
+
+    Uses:
+      Q    from equation (8a)
+      lc   from equation (8b)
+      PDI  from equation (4), rewritten via G, Rg and B
+      PDI2 from equation (21), rewritten via B, lc and Q
+
+    This is the preferred implementation path because it follows the unified-fit
+    logic of the paper and avoids finite-q numerical integration.
+    """
     if G <= 0 or Rg <= 0 or B < 0:
         return {
             'Q': 0.0,
@@ -268,6 +313,18 @@ def compute_tomchuk_analytic_quantities(G, Rg, B):
     }
 
 def compute_tomchuk_hybrid_quantities(q_exp, i_exp, G, Rg):
+    """Legacy finite-q fallback for Tomchuk quantities.
+
+    This path predates the current unified-fit-first workflow. B is estimated from
+    the measured Porod tail, then Q and lc are obtained by finite-q integration plus
+    explicit asymptotic tail terms:
+      q_tail  ~ B / q_max
+      lc_tail ~ B / (2 q_max^2)
+
+    These tail corrections are an implementation update relative to the main paper
+    concept, which recommends using analytic equations (8a) and (8b) from the
+    unified fit whenever possible to reduce PDI2 error.
+    """
     n_fit_b = max(8, min(40, len(q_exp) // 6))
     b_est = 0.0
     if n_fit_b > 0:
@@ -303,6 +360,12 @@ def compute_tomchuk_hybrid_quantities(q_exp, i_exp, G, Rg):
     }
 
 def extract_tomchuk_parameters(q_exp, i_exp, initial_rg_guess):
+    # Pipeline:
+    #   1. low-q Guinier seed for raw Rg/G
+    #   2. unified model fit [equation (1)] to get G, Rg, B over the full curve
+    #   3. analytic Tomchuk invariants/indices from equations (4), (8a), (8b), (21)
+    #   4. fallback to the older hybrid finite-q route only when the unified path
+    #      is not numerically usable
     rg_guinier, g_guinier, valid_guinier = estimate_guinier_parameters(q_exp, i_exp, initial_rg_guess, 'Sphere')
     fit_res = fit_unified_beaucage(q_exp, i_exp, rg_guinier, g_guinier) if valid_guinier else None
 
@@ -312,6 +375,8 @@ def extract_tomchuk_parameters(q_exp, i_exp, initial_rg_guess):
         unified = {'G': fit_res['G'], 'Rg': fit_res['Rg'], 'B': fit_res['B']}
         unified.update(compute_tomchuk_analytic_quantities(fit_res['G'], fit_res['Rg'], fit_res['B']))
 
+    # Keep the hybrid result available for diagnostics, but only promote it when
+    # the unified-fit path fails quality checks.
     extraction_source = 'hybrid'
     selected = {
         'Rg': float(rg_guinier),
@@ -389,7 +454,9 @@ def calculate_fit_and_rrms(q_exp, i_exp, r_vals, pdf_vals, kernel_func):
     i_mtx = kernel_func(q_exp, r_vals)
     i_calc_shape = trapezoid(i_mtx * pdf_norm, r_vals, axis=1)
 
-    # Scale to data (Least Squares)
+    # Scale the reconstructed curve back to the data by least squares. This is
+    # a validation step for the recovered distribution, not part of Tomchuk's
+    # original derivation.
     num = np.sum(i_exp * i_calc_shape)
     den = np.sum(i_calc_shape**2)
     scale = num/den if den > 0 else 1.0
@@ -403,7 +470,8 @@ def calculate_fit_and_rrms(q_exp, i_exp, r_vals, pdf_vals, kernel_func):
 
 def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, method, max_rg_nnls):
     results = {
-        'Rg': 0, 'G': 0, 'B': 0, 'Q': 0, 'lc': 0, 
+        'Rg': 0, 'G': 0, 'B': 0, 'Q': 0, 'lc': 0,
+        'Rg_guinier': 0, 'G_guinier': 0,
         'PDI': 0, 'PDI2': 0, 
         'p_rec_pdi': 0, 'p_rec_pdi2': 0,
         'mean_r_rec_pdi': 0, 'mean_r_rec_pdi2': 0,
@@ -419,11 +487,18 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
     rg_fit, g_fit, valid_fit = estimate_guinier_parameters(q_exp, i_exp, initial_rg_guess, mode)
     results['Rg'] = rg_fit
     results['G'] = g_fit
+    results['Rg_guinier'] = rg_fit
+    results['G_guinier'] = g_fit
 
     i_fit_global = np.zeros_like(i_exp)
 
     if mode == 'Sphere':
         if method == 'Tomchuk':
+            # Tomchuk sphere workflow:
+            #   - extract G, Rg, B, Q, lc
+            #   - compute PDI / PDI2
+            #   - invert the family-specific PDI-p or PDI2-p relation
+            #   - recover the mean radius once p is known
             extraction = extract_tomchuk_parameters(q_exp, i_exp, initial_rg_guess)
             fit_res = extraction.get('fit_res')
             if fit_res:
@@ -461,7 +536,8 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             results['tomchuk_hybrid'] = extraction['hybrid']
             results['tomchuk_unified'] = extraction['unified']
             
-            # --- Reconstruct Fits for PDI and PDI2 ---
+            # Reconstruct scattering curves from the recovered parameters so we can
+            # compare the PDI-based and PDI2-based solutions by forward-model RRMS.
             max_rec_r = max(mean_r_rec, mean_r_rec_2, 0)
             r_sim = np.linspace(max(0.1, max_rec_r * 0.1), max(max_rec_r * 5, 1.0), 200)
             
@@ -525,13 +601,15 @@ def get_header_string(params, analysis_res):
         f"#   Distribution Type: {params['dist_type']}",
         "#",
         "# Analysis Output:",
-        f"#   Rg (Guinier Fit): {analysis_res.get('Rg', 0):.6f} nm",
-        f"#   G (Forward Scattering): {analysis_res.get('G', 0):.6e}",
+        f"#   Rg (Guinier Fit): {analysis_res.get('Rg_guinier', analysis_res.get('Rg', 0)):.6f} nm",
+        f"#   G (Guinier Intercept): {analysis_res.get('G_guinier', analysis_res.get('G', 0)):.6e}",
     ]
     
     if params['method'] == 'Tomchuk':
         header_lines.extend([
             f"#   Tomchuk Extraction Path: {analysis_res.get('tomchuk_extraction', 'n/a')}",
+            f"#   Rg (Selected Tomchuk): {analysis_res.get('Rg', 0):.6f} nm",
+            f"#   G (Selected Tomchuk): {analysis_res.get('G', 0):.6e}",
             f"#   B (Porod Constant): {analysis_res.get('B', 0):.6e}",
             f"#   Porod Invariant (Q): {analysis_res.get('Q', 0):.6e}",
             f"#   PDI (Calculated): {analysis_res.get('PDI', 0):.6f}",

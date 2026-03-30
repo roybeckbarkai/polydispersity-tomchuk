@@ -76,7 +76,12 @@ def parse_args():
     parser.add_argument("--q-max", type=float, default=0.8)
     parser.add_argument("--n-bins", type=int, default=256)
     parser.add_argument("--pixels", type=int, default=512)
-    parser.add_argument("--flux", type=float, default=1e12)
+    parser.add_argument(
+        "--flux",
+        type=float,
+        default=1e12,
+        help="Expected photons in the nearest-to-center detector pixel before Poisson noise.",
+    )
     parser.add_argument("--smearing", type=float, default=0.0)
     parser.add_argument("--noise", action="store_true")
     parser.add_argument("--seed", type=int, default=1234)

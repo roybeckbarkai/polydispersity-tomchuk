@@ -46,8 +46,9 @@ For simulated sphere runs in Tomchuk mode, the app now normalizes the simulated 
 
 Why this is needed:
 
-- the simulator scales total detector counts using the chosen detector geometry and flux
-- that makes amplitude-carrying quantities such as `G`, `B`, and `Q` move when `q_max`, detector size, or flux are changed
+- the simulator now defines `flux` as the expected number of photons in the nearest-to-center detector pixel after smearing and before Poisson noise
+- total detector counts still change with `q_max`, detector size, smearing, and the distribution shape because those settings change how much intensity is spread away from the beam center
+- that makes raw amplitude-carrying quantities such as `G`, `B`, and `Q` move when detector settings are changed unless the 1D profile is normalized before Tomchuk extraction
 - that behavior is acceptable for raw detector counts, but it is not what we want in the theory-comparison table
 
 What the app does now:
@@ -59,8 +60,28 @@ What the app does now:
 As a result:
 
 - the theory column in single mode now depends only on the declared input `mean_rg`, `p`, and distribution family
-- flux no longer changes extracted `G`, `B`, or `Q` after normalization
+- forward-pixel photon count no longer changes extracted `G`, `B`, or `Q` after normalization
 - remaining changes with `q_max`, detector size, or smearing reflect extraction bias or detector-induced distortion rather than a simple scale mismatch
+
+Forward Pixel Photon Definition
+-------------------------------
+
+The simulator now uses the following convention for `flux`:
+
+- `flux` = expected photons in the nearest-to-center detector pixel
+- this scaling is applied after detector smearing and before optional Poisson sampling
+- for even detector sizes such as `1024 x 1024`, there is no exact `q = 0` pixel, so the code uses pixel index `(N//2, N//2)`, one of the four pixels nearest to the beam center
+
+This is different from the older convention used in the first benchmark study:
+
+- old convention: `flux = total expected photons summed over the whole detector`
+- new convention: `flux = expected photons in the center-nearest detector pixel`
+
+Because the ratio
+
+- `center pixel photons / total detector photons`
+
+depends strongly on distribution family, `p`, and smearing, the old benchmark cannot be converted to the new definition with one global scale factor.
 
 
 New UI Diagnostics
@@ -220,6 +241,38 @@ Run the recommendation evaluator:
 ```bash
 python validate_tomchuk.py --distributions Gaussian --p-values 0.3 --mean-rg 2.0 --q-max 2.5 --n-bins 256 --pixels 1024 --smearing 1.0 --flux 1e12 --recommend-settings --target-abs-error 0.01 --max-rel-error 1.0
 ```
+
+
+Large Benchmark Study
+---------------------
+
+A dedicated end-to-end study runner is available:
+
+```bash
+python run_tomchuk_benchmark_study.py --workers 6 --output-root study_outputs
+```
+
+Current benchmark assumptions in that script:
+
+- `mean_rg = 2.0 nm`
+- `q_max = 5.0 nm^-1`
+- `pixels = 1024`
+- `n_bins = 1024`
+- logarithmic binning
+- all six sphere distribution families
+- `p = 0.1 .. 1.0`
+- flux exponents `5 .. 9`
+- smearing `1 .. 10`
+- five replicates per condition
+
+Outputs are written into a dedicated timestamped folder under `study_outputs/` and include:
+
+- one TIFF detector image per run
+- one 1D CSV per run
+- a master summary CSV for all runs
+- aggregated summary CSV files
+- generated figures
+- a LaTeX appendix and compiled PDF report
 
 
 Current Test Results
