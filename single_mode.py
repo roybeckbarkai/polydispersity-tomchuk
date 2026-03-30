@@ -82,18 +82,25 @@ def run():
     nnls_max_rg = st.sidebar.number_input("Max Rg (Basis Set)", min_value=1.0, max_value=500.0, step=1.0, key='nnls_max_rg')
 
     st.sidebar.header("Instrument / Binning")
-    pixels = st.sidebar.number_input("Detector Size (NxN)", value=1024, step=64, key='pixels')
+    pixels = st.sidebar.number_input("Detector Size (NxN)", value=1000, step=64, key='pixels')
     c_q1, c_q2 = st.sidebar.columns(2)
     with c_q1: q_min = st.sidebar.number_input("Min q", min_value=0.0, step=0.01, key='q_min')
     with c_q2: q_max = st.sidebar.number_input("Max q", min_value=0.01, step=0.1, key='q_max')
     n_bins = st.sidebar.number_input("1D Bins", value=256, min_value=10, step=10, key='n_bins')
     binning_mode = st.sidebar.selectbox("Binning Mode", ["Logarithmic", "Linear"], key='binning_mode')
-    smearing = st.sidebar.number_input("Smearing (px)", value=2.0, step=0.5, key='smearing')
+    smearing = st.sidebar.number_input("Smearing (px)", value=3.0, step=0.5, key='smearing')
 
     st.sidebar.header("Forward Pixel Photons & Noise")
     c_f1, c_f2 = st.sidebar.columns(2)
-    with c_f1: flux_pre = st.number_input("Forward Coeff", 0.1, 9.9, 1.0, 0.1, key='flux_pre')
-    with c_f2: flux_exp = st.number_input("Forward Exp", 1, 15, 6, 1, key='flux_exp')
+    flux_help = (
+        "Flux is interpreted as I(0)/(pixel dimension): "
+        "the target expected photons in the nearest-to-center detector pixel "
+        "after smearing and before Poisson noise."
+    )
+    with c_f1:
+        flux_pre = st.number_input("Forward Coeff", 0.1, 9.9, 1.0, 0.1, key='flux_pre', help=flux_help)
+    with c_f2:
+        flux_exp = st.number_input("Forward Exp", 1, 15, 8, 1, key='flux_exp', help=flux_help)
     st.sidebar.caption("Target expected photons in the nearest-to-center detector pixel before Poisson noise.")
     optimal_flux = st.sidebar.checkbox("Deterministic Counts (No Noise)", value=False, key='optimal_flux')
     add_noise = st.sidebar.checkbox("Simulate Poisson Noise", value=True, disabled=optimal_flux, key='add_noise')
