@@ -64,47 +64,50 @@ def expand_batch_parameters(df):
     return pd.DataFrame(all_jobs)
 
 
-def _default_row():
+def _default_row(settings_like=None):
+    settings_like = DEFAULT_APP_SETTINGS if settings_like is None else settings_like
+    sim_mode = settings_like.get("sim_mode", "Polydisperse Spheres")
+    mode_value = "Sphere" if "Sphere" in sim_mode else "IDP"
     return {
-        "mode (S/P)": REV_MODE_MAP.get("Sphere", "S"),
-        "dist (G/L/S/B/T/U)": REV_DIST_MAP.get(DEFAULT_APP_SETTINGS["dist_type"], "G"),
-        "method (T/N/E)": REV_METHOD_MAP.get(DEFAULT_APP_SETTINGS["analysis_method"], "N"),
-        "mean_rg": str(DEFAULT_APP_SETTINGS["mean_rg"]),
-        "p_val": str(DEFAULT_APP_SETTINGS["p_val"]),
-        "pixels": str(DEFAULT_APP_SETTINGS["pixels"]),
-        "q_min": str(DEFAULT_APP_SETTINGS["q_min"]),
-        "q_max": str(DEFAULT_APP_SETTINGS["q_max"]),
-        "n_bins": str(DEFAULT_APP_SETTINGS["n_bins"]),
+        "mode (S/P)": REV_MODE_MAP.get(mode_value, "S"),
+        "dist (G/L/S/B/T/U)": REV_DIST_MAP.get(settings_like["dist_type"], "G"),
+        "method (T/N/E)": REV_METHOD_MAP.get(settings_like["analysis_method"], "N"),
+        "mean_rg": str(settings_like["mean_rg"]),
+        "p_val": str(settings_like["p_val"]),
+        "pixels": str(settings_like["pixels"]),
+        "q_min": str(settings_like["q_min"]),
+        "q_max": str(settings_like["q_max"]),
+        "n_bins": str(settings_like["n_bins"]),
         "binning (Log/Lin)": "Log",
-        "smearing_x": str(DEFAULT_APP_SETTINGS["smearing_x"]),
-        "smearing_y": str(DEFAULT_APP_SETTINGS["smearing_y"]),
-        "flux": str(DEFAULT_APP_SETTINGS["flux_pre"] * (10 ** DEFAULT_APP_SETTINGS["flux_exp"])),
+        "smearing_x": str(settings_like["smearing_x"]),
+        "smearing_y": str(settings_like["smearing_y"]),
+        "flux": str(settings_like["flux_pre"] * (10 ** settings_like["flux_exp"])),
         "noise": "True",
-        "radius_samples": str(DEFAULT_APP_SETTINGS["radius_samples"]),
-        "q_samples": str(DEFAULT_APP_SETTINGS["q_samples"]),
-        "form_factor_model": str(DEFAULT_APP_SETTINGS["form_factor_model"]),
-        "phi2": str(DEFAULT_APP_SETTINGS["phi2"]),
-        "phi3": str(DEFAULT_APP_SETTINGS["phi3"]),
-        "weight_power": str(DEFAULT_APP_SETTINGS["weight_power"]),
-        "ensemble_sampling": str(DEFAULT_APP_SETTINGS["ensemble_sampling"]),
-        "ensemble_members": str(DEFAULT_APP_SETTINGS["ensemble_members"]),
-        "nnls_max_rg": str(DEFAULT_APP_SETTINGS["nnls_max_rg"]),
-        "nnls_basis_count": str(DEFAULT_APP_SETTINGS["nnls_basis_count"]),
-        "nnls_smooth_sigma": str(DEFAULT_APP_SETTINGS["nnls_smooth_sigma"]),
-        "tenor_guinier_bins": str(DEFAULT_APP_SETTINGS["tenor_guinier_bins"]),
-        "tenor_radial_bins": str(DEFAULT_APP_SETTINGS["tenor_radial_bins"]),
-        "tenor_qrg_limit": str(DEFAULT_APP_SETTINGS["tenor_qrg_limit"]),
-        "tenor_psf_count": str(DEFAULT_APP_SETTINGS["tenor_psf_count"]),
-        "tenor_psf_truncate": str(DEFAULT_APP_SETTINGS["tenor_psf_truncate"]),
-        "tenor_psf_sigma_x_start": str(DEFAULT_APP_SETTINGS["tenor_psf_sigma_x_start"]),
-        "tenor_psf_sigma_y_start": str(DEFAULT_APP_SETTINGS["tenor_psf_sigma_y_start"]),
-        "tenor_psf_sigma_step": str(DEFAULT_APP_SETTINGS["tenor_psf_sigma_step"]),
-        "tenor_psf_secondary_ratio": str(DEFAULT_APP_SETTINGS["tenor_psf_secondary_ratio"]),
-        "tenor_use_g3": str(DEFAULT_APP_SETTINGS["tenor_use_g3"]),
-        "tenor_use_m3": str(DEFAULT_APP_SETTINGS["tenor_use_m3"]),
-        "tenor_calibration_p_min": str(DEFAULT_APP_SETTINGS["tenor_calibration_p_min"]),
-        "tenor_calibration_p_max": str(DEFAULT_APP_SETTINGS["tenor_calibration_p_max"]),
-        "tenor_calibration_p_count": str(DEFAULT_APP_SETTINGS["tenor_calibration_p_count"]),
+        "radius_samples": str(settings_like["radius_samples"]),
+        "q_samples": str(settings_like["q_samples"]),
+        "form_factor_model": str(settings_like["form_factor_model"]),
+        "phi2": str(settings_like["phi2"]),
+        "phi3": str(settings_like["phi3"]),
+        "weight_power": str(settings_like["weight_power"]),
+        "ensemble_sampling": str(settings_like["ensemble_sampling"]),
+        "ensemble_members": str(settings_like["ensemble_members"]),
+        "nnls_max_rg": str(settings_like["nnls_max_rg"]),
+        "nnls_basis_count": str(settings_like["nnls_basis_count"]),
+        "nnls_smooth_sigma": str(settings_like["nnls_smooth_sigma"]),
+        "tenor_guinier_bins": str(settings_like["tenor_guinier_bins"]),
+        "tenor_radial_bins": str(settings_like["tenor_radial_bins"]),
+        "tenor_qrg_limit": str(settings_like["tenor_qrg_limit"]),
+        "tenor_psf_count": str(settings_like["tenor_psf_count"]),
+        "tenor_psf_truncate": str(settings_like["tenor_psf_truncate"]),
+        "tenor_psf_sigma_x_start": str(settings_like["tenor_psf_sigma_x_start"]),
+        "tenor_psf_sigma_y_start": str(settings_like["tenor_psf_sigma_y_start"]),
+        "tenor_psf_sigma_step": str(settings_like["tenor_psf_sigma_step"]),
+        "tenor_psf_secondary_ratio": str(settings_like["tenor_psf_secondary_ratio"]),
+        "tenor_use_g3": str(settings_like["tenor_use_g3"]),
+        "tenor_use_m3": str(settings_like["tenor_use_m3"]),
+        "tenor_calibration_p_min": str(settings_like["tenor_calibration_p_min"]),
+        "tenor_calibration_p_max": str(settings_like["tenor_calibration_p_max"]),
+        "tenor_calibration_p_count": str(settings_like["tenor_calibration_p_count"]),
     }
 
 
@@ -116,7 +119,7 @@ def run():
 
     tab_settings, tab_results = st.tabs(["Settings", "Results"])
     if "batch_df" not in st.session_state:
-        st.session_state.batch_df = pd.DataFrame([_default_row()])
+        st.session_state.batch_df = pd.DataFrame([_default_row(st.session_state)])
 
     with tab_settings:
         c1, c2 = st.columns(2)
@@ -131,7 +134,7 @@ def run():
         with c2:
             st.download_button(
                 "Download Template",
-                pd.DataFrame([_default_row()]).to_csv(index=False),
+                pd.DataFrame([_default_row(st.session_state)]).to_csv(index=False),
                 "batch_template.csv",
                 "text/csv",
             )

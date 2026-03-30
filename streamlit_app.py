@@ -5,6 +5,7 @@
 import streamlit as st
 import single_mode
 import batch_mode
+from app_settings import ensure_session_state_defaults, persist_app_settings
 
 st.set_page_config(page_title="SAXS Simulator", layout="wide", page_icon="⚛️")
 
@@ -12,16 +13,7 @@ st.set_page_config(page_title="SAXS Simulator", layout="wide", page_icon="⚛️
 if 'page' not in st.session_state:
     st.session_state.page = 'home'
 
-if 'init' not in st.session_state:
-    st.session_state['init'] = True
-    # Default parameters needed for batch mode initialization if user goes straight there
-    st.session_state['mean_rg'] = 4.0
-    st.session_state['p_val'] = 0.3
-    st.session_state['q_max'] = 2.5
-    st.session_state['n_bins'] = 512
-    st.session_state['nnls_max_rg'] = 30.0
-    st.session_state['mode_key'] = 'Sphere' 
-    st.session_state['dist_type'] = 'Gaussian'
+ensure_session_state_defaults(st.session_state)
 
 # --- Navigation Logic ---
 if st.session_state.page == 'home':
@@ -65,3 +57,5 @@ elif st.session_state.page == 'single':
 
 elif st.session_state.page == 'batch':
     batch_mode.run()
+
+persist_app_settings(st.session_state)
