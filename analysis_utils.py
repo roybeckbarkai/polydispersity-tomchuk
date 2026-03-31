@@ -9,7 +9,15 @@ from scipy.integrate import trapezoid
 from scipy.ndimage import gaussian_filter
 from scipy.special import erf, gammaln
 import pandas as pd
-from sim_utils import nCr, double_factorial, sphere_form_factor, debye_form_factor, get_distribution, run_simulation_core
+from sim_utils import (
+    nCr,
+    double_factorial,
+    sphere_form_factor,
+    debye_form_factor,
+    get_detector_q_max,
+    get_distribution,
+    run_simulation_core,
+)
 from app_settings import build_tenor_p_grid
 
 # Tomchuk's analytic Q and lc expressions [equations (8a) and (8b)]
@@ -586,7 +594,13 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
         elif method == 'Tenor':
             if i_2d is None:
                 raise ValueError("TENOR-SAXS requires a 2D detector image.")
-            from tenor_saxs import analyze_tenor_saxs_2d, build_default_psf_pairs
+            from tenor_saxs import analyze_tenor_saxs_2d, build_default_psf_pairs, simulate_tenor_ground_truth
+            tenor_guinier_bins = int(
+                analysis_settings.get(
+                    'tenor_guinier_bins',
+                    max(64, min(int(analysis_settings.get('n_bins', 256)), 256)),
+                )
+            )
             psf_pairs = build_default_psf_pairs(
                 sigma_x_start=analysis_settings.get('tenor_psf_sigma_x_start', 1.2),
                 sigma_y_start=analysis_settings.get('tenor_psf_sigma_y_start', 0.6),
@@ -596,17 +610,30 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             )
             tenor = analyze_tenor_saxs_2d(
                 i_2d=i_2d,
-                q_max=float(analysis_settings.get('q_max_for_tenor', q_exp[-1] if len(q_exp) > 0 else 1.0)),
+                q_max=float(
+                    analysis_settings.get(
+                        'q_max_for_tenor',
+                        get_detector_q_max(
+                            pixels=i_2d.shape[0],
+                            q_max=q_exp[-1] if len(q_exp) > 0 else 1.0,
+                            pixel_size_um=analysis_settings.get('pixel_size_um'),
+                            sample_detector_distance_cm=analysis_settings.get('sample_detector_distance_cm'),
+                            wavelength_nm=analysis_settings.get('wavelength_nm'),
+                        ),
+                    )
+                ),
                 dist_type=dist_type,
                 initial_rg_guess=initial_rg_guess,
                 psf_pairs=psf_pairs,
                 n_radial_bins=int(analysis_settings.get('tenor_radial_bins', 18)),
                 qrg_limit=float(analysis_settings.get('tenor_qrg_limit', 0.85)),
-                guinier_bins=int(analysis_settings.get('tenor_guinier_bins', 256)),
+                guinier_bins=tenor_guinier_bins,
                 calibration_p_grid=build_tenor_p_grid(analysis_settings),
                 psf_truncate=float(analysis_settings.get('tenor_psf_truncate', 4.0)),
                 use_m3=bool(analysis_settings.get('tenor_use_m3', True)),
                 use_g3=bool(analysis_settings.get('tenor_use_g3', True)),
+                simulation_params_for_calibration=analysis_settings,
+                reconstruction_trials=int(analysis_settings.get('tenor_reconstruction_trials', 1)),
             )
             results['Rg'] = tenor['mean_rg_rec']
             results['G'] = tenor['g_app']
@@ -623,10 +650,66 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             results['tenor_raw_m210_ratio'] = tenor['observable_raw_m210_ratio']
             results['tenor_raw_m1_over_m0'] = tenor['observable_raw_m1_over_m0']
             results['tenor_candidate_count'] = tenor['candidate_count']
+            results['tenor_candidate_plausible_count'] = tenor.get('candidate_plausible_count', tenor['candidate_count'])
+            results['tenor_unstable_no_plausible_candidate'] = bool(tenor.get('unstable_no_plausible_candidate', False))
+            results['tenor_candidate_reconstruction_count'] = tenor.get('candidate_reconstruction_count', 1)
+            results['tenor_best_recon_rrms_2d'] = tenor.get('best_recon_rrms_2d', np.nan)
             results['tenor_best_psf_pair'] = tenor['best_psf_pair']
             results['tenor_g_rmse'] = tenor['best_g_rmse']
             results['tenor_m_rmse'] = tenor['best_m_rmse']
             results['method'] = 'Tenor'
+            if bool(analysis_settings.get('compute_tenor_ground_truth', True)):
+                try:
+                    tenor_truth = simulate_tenor_ground_truth(
+                        mean_rg=float(analysis_settings.get('mean_rg', initial_rg_guess)),
+                        p_val=float(analysis_settings.get('p_val', 0.0)),
+                        dist_type=dist_type,
+                        q_max=float(
+                            analysis_settings.get(
+                                'q_max_for_tenor',
+                                get_detector_q_max(
+                                    pixels=i_2d.shape[0],
+                                    q_max=q_exp[-1] if len(q_exp) > 0 else 1.0,
+                                    pixel_size_um=analysis_settings.get('pixel_size_um'),
+                                    sample_detector_distance_cm=analysis_settings.get('sample_detector_distance_cm'),
+                                    wavelength_nm=analysis_settings.get('wavelength_nm'),
+                                ),
+                            )
+                        ),
+                        pixels=int(i_2d.shape[0]),
+                        pixel_size_um=analysis_settings.get('pixel_size_um'),
+                        sample_detector_distance_cm=analysis_settings.get('sample_detector_distance_cm'),
+                        wavelength_nm=analysis_settings.get('wavelength_nm'),
+                        psf_pairs=psf_pairs,
+                        phi2=float(analysis_settings.get('phi2', -1.0 / 63.0)),
+                        n_radial_bins=int(analysis_settings.get('tenor_radial_bins', 18)),
+                        qrg_limit=float(analysis_settings.get('tenor_qrg_limit', 0.85)),
+                        guinier_bins=tenor_guinier_bins,
+                        calibration_p_grid=build_tenor_p_grid(analysis_settings),
+                        psf_truncate=float(analysis_settings.get('tenor_psf_truncate', 4.0)),
+                        use_m3=bool(analysis_settings.get('tenor_use_m3', True)),
+                        use_g3=bool(analysis_settings.get('tenor_use_g3', True)),
+                        radius_samples=int(analysis_settings.get('radius_samples', 400)),
+                        q_samples=int(analysis_settings.get('q_samples', 200)),
+                        form_factor_model=analysis_settings.get('form_factor_model', 'Exact Sphere'),
+                        ensemble_sampling=analysis_settings.get('ensemble_sampling', 'Continuous'),
+                        ensemble_members=int(analysis_settings.get('ensemble_members', 11)),
+                        simulation_params=analysis_settings,
+                    )
+                    results['tenor_truth_weighted_v'] = tenor_truth['weighted_v']
+                    results['tenor_truth_weighted_v_input'] = tenor_truth['weighted_v_true_from_input']
+                    results['tenor_truth_p'] = tenor_truth['p_rec']
+                    results['tenor_truth_p_input'] = tenor_truth['p_true_from_input']
+                    results['tenor_truth_mean_rg'] = tenor_truth['mean_rg_rec']
+                    results['tenor_truth_mean_rg_input'] = tenor_truth['mean_rg_true_from_input']
+                    results['tenor_truth_mean_r'] = tenor_truth['mean_r_rec']
+                    results['tenor_truth_mean_r_input'] = tenor_truth['mean_r_true_from_input']
+                    results['tenor_truth_raw_g1_over_g0'] = tenor_truth['observable_raw_g1_over_g0']
+                    results['tenor_truth_dimless_jg'] = tenor_truth['observable_dimless_jg']
+                    results['tenor_truth_rg_app'] = tenor_truth['rg_app']
+                    results['tenor_truth_candidate_count'] = tenor_truth['candidate_count']
+                except Exception:
+                    pass
             r_sim = np.linspace(
                 max(0.1, tenor['mean_r_rec'] * 0.1),
                 max(tenor['mean_r_rec'] * 5.0, 1.0),
@@ -1148,7 +1231,12 @@ def recommend_tomchuk_settings(
 def run_simulation_analysis_case(params):
     q_sim, i_sim, i_2d, r_vals, pdf_vals = run_simulation_core(params)
     i_for_analysis = i_sim
-    if params['mode'] == 'Sphere' and params.get('method') == 'Tomchuk' and params.get('normalize_simulated', True):
+    if (
+        params['mode'] == 'Sphere'
+        and params.get('method') == 'Tomchuk'
+        and params.get('normalize_simulated', True)
+        and params.get('form_factor_model', 'Exact Sphere') == 'Exact Sphere'
+    ):
         i_for_analysis, norm_scale = normalize_simulated_sphere_intensity(q_sim, i_sim, r_vals, pdf_vals)
     else:
         norm_scale = 1.0

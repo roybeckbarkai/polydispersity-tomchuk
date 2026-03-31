@@ -1,0 +1,182 @@
+{
+  "_comment": "Persisted GUI defaults. Each entry stores the startup value and a short explanation of its role.",
+  "_format": "app_settings_v2",
+  "settings": {
+    "add_noise": {
+      "_comment": "Whether Poisson counting noise is added to the simulated detector data.",
+      "value": true
+    },
+    "analysis_method": {
+      "_comment": "Default analysis method used to recover size and polydispersity from the simulated data. Allowed values: 'NNLS', 'Tomchuk', 'Tenor'.",
+      "value": "Tenor"
+    },
+    "binning_mode": {
+      "_comment": "Whether the 1D q bins are spaced linearly or logarithmically. Allowed values: 'Linear', 'Logarithmic'.",
+      "value": "Logarithmic"
+    },
+    "dist_type": {
+      "_comment": "Probability distribution family used to generate the ensemble. Allowed values: 'Gaussian', 'Lognormal', 'Schulz', 'Boltzmann', 'Triangular', 'Uniform'.",
+      "value": "Gaussian"
+    },
+    "ensemble_members": {
+      "_comment": "Number of representative sizes kept when Ensemble Sampling is set to Discrete. This value is ignored in Continuous mode, where the simulator integrates across the full radius_samples grid instead of selecting a finite member list.",
+      "value": 41
+    },
+    "ensemble_sampling": {
+      "_comment": "Whether the ensemble is integrated continuously or approximated with a finite number of members. Allowed values: 'Continuous', 'Discrete'.",
+      "value": "Continuous"
+    },
+    "flux_exp": {
+      "_comment": "Base-10 exponent used in scientific notation for the central-pixel flux target.",
+      "value": 6
+    },
+    "flux_pre": {
+      "_comment": "Mantissa used in scientific notation for the central-pixel flux target.",
+      "value": 1.0
+    },
+    "form_factor_model": {
+      "_comment": "Forward model used for the particle form factor. Allowed values: 'Exact Sphere', 'Guinier Curvature', 'Exact Gaussian Chain', 'Exact Shell', 'Exact Thin Rod', 'Exact Thin Disk'.",
+      "value": "Exact Sphere"
+    },
+    "mean_rg": {
+      "_comment": "Mean radius of gyration of the simulated ensemble, in the app's working length units.",
+      "value": 3.950443013131565
+    },
+    "n_bins": {
+      "_comment": "Number of q bins used when reducing the detector image to a 1D intensity profile.",
+      "value": 1000
+    },
+    "nnls_basis_count": {
+      "_comment": "Number of basis functions used in the NNLS inversion grid.",
+      "value": 150
+    },
+    "nnls_max_rg": {
+      "_comment": "Largest radius of gyration included in the NNLS basis grid.",
+      "value": 30.0
+    },
+    "nnls_smooth_sigma": {
+      "_comment": "Gaussian smoothing width applied to the recovered NNLS distribution.",
+      "value": 1.0
+    },
+    "optimal_flux": {
+      "_comment": "Whether the app should override the user flux and choose an internally optimized flux value.",
+      "value": false
+    },
+    "p_val": {
+      "_comment": "Polydispersity parameter used to define the width of the selected size distribution.",
+      "value": 0.2
+    },
+    "phi2": {
+      "_comment": "Second-order curvature coefficient used only by the Guinier Curvature forward model. It is ignored by Exact Sphere, Exact Gaussian Chain, Exact Shell, Exact Thin Rod, and Exact Thin Disk, because those models already define their own full q dependence.",
+      "value": -0.015873015873015872
+    },
+    "phi3": {
+      "_comment": "Third-order curvature coefficient used only by the Guinier Curvature forward model. It is ignored by the exact form-factor models and can usually stay at zero unless you are intentionally using the truncated Guinier-curvature expansion.",
+      "value": 0.0
+    },
+    "pixel_size_um": {
+      "_comment": "Physical detector pixel dimension in micrometers. The total detector width is pixels multiplied by this value.",
+      "value": 70.0
+    },
+    "pixels": {
+      "_comment": "Number of detector pixels along one image dimension for the simulated 2D pattern.",
+      "value": 1500
+    },
+    "q_max": {
+      "_comment": "Maximum q value used by the current analysis target. In the single-run GUI this is derived automatically from the actual data: detector-limited q_max for simulated data, or the last q point for uploaded 1D data.",
+      "value": 1.83137398411765
+    },
+    "q_min": {
+      "_comment": "Minimum q value included in the generated or analyzed 1D profile.",
+      "value": 0.0
+    },
+    "q_samples": {
+      "_comment": "Number of internal q samples used when evaluating the forward model before interpolation onto the detector. Increase this when the form factor has structure or oscillations, or when you want smoother detector interpolation. It matters much less for low-q Guinier-only work than for broad-q exact form-factor simulations.",
+      "value": 2000
+    },
+    "radius_samples": {
+      "_comment": "Number of radius or Rg support points used to build the size grid before simulation. This matters mainly for Continuous ensemble sampling, where the distribution is integrated across the full grid. In Discrete sampling, this still defines the candidate grid, but the simulator keeps only ensemble_members representative points.",
+      "value": 2000
+    },
+    "sample_detector_distance_cm": {
+      "_comment": "Sample-to-detector distance used to convert detector position into q, in centimeters.",
+      "value": 360.0
+    },
+    "sim_mode": {
+      "_comment": "Top-level simulation family used by the GUI and analysis pipeline. Allowed values: 'Polydisperse Spheres', 'Polydisperse IDP'.",
+      "value": "Polydisperse Spheres"
+    },
+    "smearing_x": {
+      "_comment": "Gaussian detector smearing width along the horizontal detector axis, in pixels.",
+      "value": 3.0
+    },
+    "smearing_y": {
+      "_comment": "Gaussian detector smearing width along the vertical detector axis, in pixels.",
+      "value": 3.0
+    },
+    "tenor_calibration_p_count": {
+      "_comment": "Number of p values sampled in the Tenor-SAXS simulation calibration grid.",
+      "value": 15
+    },
+    "tenor_calibration_p_max": {
+      "_comment": "Maximum p value included in the Tenor-SAXS simulation calibration grid.",
+      "value": 1.0
+    },
+    "tenor_calibration_p_min": {
+      "_comment": "Minimum p value included in the Tenor-SAXS simulation calibration grid.",
+      "value": 0.01
+    },
+    "tenor_psf_count": {
+      "_comment": "Number of PSF quartets scanned when searching for a stable Tenor-SAXS observable extraction.",
+      "value": 20
+    },
+    "tenor_psf_secondary_ratio": {
+      "_comment": "Relative width factor used to define the secondary PSF in each Tenor-SAXS quartet.",
+      "value": 0.5
+    },
+    "tenor_psf_sigma_step": {
+      "_comment": "Increment applied between successive Tenor-SAXS PSF scan candidates, in pixels.",
+      "value": 0.4
+    },
+    "tenor_psf_sigma_x_start": {
+      "_comment": "Starting horizontal PSF sigma for the Tenor-SAXS PSF scan, in pixels.",
+      "value": 1.2
+    },
+    "tenor_psf_sigma_y_start": {
+      "_comment": "Starting vertical PSF sigma for the Tenor-SAXS PSF scan, in pixels.",
+      "value": 0.6
+    },
+    "tenor_psf_truncate": {
+      "_comment": "Gaussian kernel truncation radius, in sigma units, for digitally applied Tenor PSFs.",
+      "value": 4.0
+    },
+    "tenor_qrg_limit": {
+      "_comment": "Upper qRg cutoff used when selecting the apparent Guinier fitting region for Tenor-SAXS.",
+      "value": 0.85
+    },
+    "tenor_radial_bins": {
+      "_comment": "Number of radial sectors used in the Tenor-SAXS observable extraction workflow.",
+      "value": 180
+    },
+    "tenor_reconstruction_trials": {
+      "_comment": "Number of candidate TENOR quartets that are carried into the reconstruction-validation stage. The code ranks quartets by physical plausibility and fit quality, then re-simulates these candidates and keeps the one whose reconstructed 2D data best matches the raw detector image.",
+      "value": 10
+    },
+    "tenor_use_g3": {
+      "_comment": "Whether the Tenor-SAXS G(Q) fit includes a cubic-in-Q term. The MATLAB working3_26 example keeps this off, so the default is False.",
+      "value": true
+    },
+    "tenor_use_m3": {
+      "_comment": "Whether the Tenor-SAXS M(Q) fit includes a cubic-in-Q term. The MATLAB working3_26 example keeps this off, so the default is False.",
+      "value": true
+    },
+    "tomchuk_target_abs_error": {
+      "_comment": "Target absolute fitting tolerance used by the Tomchuk recovery procedure.",
+      "value": 0.001
+    },
+    "wavelength_nm": {
+      "_comment": "Beam wavelength used to convert detector position into q, in nanometers.",
+      "value": 0.1
+    }
+  }
+}

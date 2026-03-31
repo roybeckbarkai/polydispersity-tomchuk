@@ -6,10 +6,11 @@ This repository contains a Streamlit application for simulating and analyzing sm
 - polydisperse spheres
 - fixed-length polymer / IDP-style scattering
 
-The app supports two analysis paths for spheres:
+The app supports three analysis paths for spheres:
 
 - `Tomchuk (Invariants)`
 - `NNLS (Distribution Fit)`
+- `Tenor-SAXS (2D Observable Extraction)`
 
 For IDP mode, the app uses `NNLS` only.
 
@@ -107,6 +108,132 @@ The quality labels are:
 These labels are intentionally conservative.
 
 
+Tenor-SAXS In This Code
+-----------------------
+
+The Tenor branch is implemented in `tenor_saxs.py` and integrated into the
+shared pipeline through `analysis_utils.py`.
+
+Current extraction flow:
+
+1. estimate the apparent Guinier `Rg` from the same shared 2D->1D reducer used elsewhere in the app
+2. scan a family of anisotropic digital PSF quartets
+3. fit the log-ratio observable for each quartet using the MATLAB-style weighted centered model
+4. reject quartets whose recovered `J_G` is physically implausible for the selected distribution family
+5. calibrate surviving candidates against forward simulations using the same simulator settings as the app
+6. optionally re-simulate several candidate quartets and choose the one whose reconstructed 2D data best matches the raw 2D data
+
+Important practical notes:
+
+- Tenor requires a 2D detector image
+- the app derives the Tenor Guinier bin count internally from the main `1D Bins` setting
+- the Tenor calibration now reuses the same section-4-style forward simulation path that is also used for its noise-free ground-truth comparison
+- for spheres, the input `p` is the number-density polydispersity, while Tenor's variance observable is scattering-weighted; the code converts the recovered weighted variance back to the corresponding number-density `p`
+
+
+Tenor Stability And Failure Handling
+------------------------------------
+
+The Tenor branch can become unstable in noisy or low-flux conditions.
+
+The main failure signature is:
+
+- no physically plausible quartet survives the `J_G` plausibility filter
+
+When that happens, the app now:
+
+- marks the run as unstable
+- shows a warning in the UI
+- reports the main recovered Tenor quantities as `n/a` instead of presenting unreliable values as normal results
+
+The most useful settings to try first are:
+
+- increase photon statistics / flux
+- increase `TENOR Recon Trials` from `1` to about `3-5`
+
+The settings below usually have smaller effect by themselves:
+
+- `TENOR Calibration Points`
+- `TENOR PSF Pair Count`
+
+In the current implementation, random quartet selection is not used by default,
+because randomizing among bad candidates does not solve the core failure mode.
+The main bottleneck is whether the data support any physically plausible
+observable extraction at all.
+
+For a focused discussion of how this implementation differs from the original
+text protocol, see:
+
+- `TENOR_STABILITY_NOTES.md`
+
+
+Persistent GUI Settings
+-----------------------
+
+The app now stores its current defaults in `app_settings.json`.
+
+This means:
+
+- changing a widget updates the saved settings
+- leaving and returning to Home preserves the latest values
+- restarting the app reloads the last saved values
+
+The JSON file stores:
+
+- the current value for each parameter
+- a short `_comment` describing what that parameter controls
+
+
+Instrument Geometry In The Current Simulator
+--------------------------------------------
+
+The simulator is now geometry-driven instead of using a fixed detector-size
+shortcut.
+
+The relevant inputs are:
+
+- detector pixels
+- pixel size in micrometers
+- sample-to-detector distance
+- wavelength
+
+From these values the code derives the detector-limited `q_max`.
+
+In single mode:
+
+- `Analysis q max` is derived automatically from the actual data
+- for simulated data it is the instrument-limited detector maximum
+- for uploaded 1D data it is the largest measured `q`
+
+
+Simulation Controls
+-------------------
+
+Several simulation controls are now explicit in the GUI instead of being hidden
+"magic numbers".
+
+The most important ones are:
+
+- `radius_samples`
+- `q_samples`
+- `ensemble_sampling`
+- `ensemble_members`
+- forward-model choice
+- anisotropic smearing in `x` and `y`
+
+Interpretation:
+
+- `radius_samples`: support size grid used to represent the ensemble before simulation
+- `q_samples`: internal q grid used before interpolation onto the detector
+- `ensemble_members`: only matters in `Discrete` ensemble mode
+- `phi2` and `phi3`: only matter when `Forward Model = Guinier Curvature`
+
+For exact sphere simulations:
+
+- you do not need to supply `phi2` or `phi3`
+- the exact-sphere form factor already defines the q dependence
+
+
 What Is In The Repository
 -------------------------
 
@@ -115,7 +242,11 @@ What Is In The Repository
 - `batch_mode.py`: batch queue UI
 - `analysis_utils.py`: shared analysis, export, and batch/validation helpers
 - `sim_utils.py`: simulation kernels and distribution models
+- `tenor_saxs.py`: standalone Tenor-SAXS extraction, calibration, and truth helpers
+- `app_settings.py` / `app_settings.json`: persisted GUI defaults and descriptions
 - `validate_tomchuk.py`: command-line validation benchmark for Tomchuk recovery
+- `validate_tenor_saxs.py`: command-line validation benchmark for Tenor-SAXS recovery
+- `TENOR_STABILITY_NOTES.md`: notes on Tenor stability handling and deviations from the paper workflow
 - `run_app.sh`: convenience launcher for macOS/Linux shells
 
 
@@ -162,6 +293,9 @@ If port `8501` is busy:
 ```bash
 streamlit run streamlit_app.py --server.port 8502
 ```
+
+For better reload performance in Streamlit, `watchdog` is now included in
+`requirements.txt`.
 
 
 Batch Mode
