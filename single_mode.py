@@ -55,7 +55,6 @@ PARAM_HELP = {
     "nnls_smooth_sigma": "Smoothing strength applied to the NNLS recovered distribution.",
     "nnls_max_rg": "Largest Rg value included in the NNLS basis set.",
     "tomchuk_target_abs_error": "Target absolute error in recovered p used by the Tomchuk q-range evaluator.",
-    "tenor_guinier_bins": "Number of radial bins used for the apparent Guinier estimate in Tenor-SAXS.",
     "tenor_radial_bins": "Number of angular/radial sectors used in Tenor-SAXS observable extraction.",
     "tenor_qrg_limit": "Upper qRg limit used when selecting the low-q region for Tenor fitting.",
     "tenor_psf_count": "Number of PSF quartets tested in the Tenor-SAXS scan.",
@@ -64,6 +63,7 @@ PARAM_HELP = {
     "tenor_psf_sigma_step": "Increment between successive PSF candidates in the Tenor-SAXS scan.",
     "tenor_psf_secondary_ratio": "Ratio between the primary and secondary PSF widths inside each Tenor pair.",
     "tenor_psf_truncate": "Kernel truncation radius, in sigma units, for digital PSFs in Tenor-SAXS.",
+    "tenor_reconstruction_trials": "How many candidate Tenor quartets are re-evaluated by full forward reconstruction. Larger values are slower, but they reduce the chance that a low-residual yet unstable quartet is chosen.",
     "tenor_calibration_p_min": "Smallest p value included in the Tenor calibration grid.",
     "tenor_calibration_p_max": "Largest p value included in the Tenor calibration grid.",
     "tenor_calibration_p_count": "Number of calibration p values simulated by Tenor-SAXS.",
@@ -75,6 +75,10 @@ def _derive_analysis_q_max(detector_q_max, q_loaded=None, use_loaded_data=False)
     if use_loaded_data and q_loaded is not None and len(q_loaded) > 0:
         return float(np.max(q_loaded))
     return float(detector_q_max)
+
+
+def _derive_tenor_guinier_bins(n_bins):
+    return int(max(64, min(int(n_bins), 256)))
 
 
 def _current_reconstructed_fit(analysis_res, analysis_method):
@@ -104,7 +108,45 @@ def _build_analysis_settings(params):
     return {
         **st.session_state,
         "q_max_for_tenor": detector_q_max,
+        "tenor_guinier_bins": _derive_tenor_guinier_bins(params["n_bins"]),
     }
+
+
+def _run_q_samples_sensitivity(base_params):
+    candidate_values = sorted(
+        {
+            100,
+            200,
+            400,
+            800,
+            1000,
+            1600,
+            2400,
+            int(base_params["q_samples"]),
+        }
+    )
+    reference_q_samples = max(4000, int(max(candidate_values) * 2))
+    ref_params = {**base_params, "q_samples": reference_q_samples, "noise": False}
+    _, _, i_2d_ref, _, _ = run_simulation_core(ref_params)
+    norm_ref = float(np.linalg.norm(i_2d_ref))
+    peak_ref = float(np.max(np.abs(i_2d_ref)))
+
+    rows = []
+    for q_samples in candidate_values:
+        test_params = {**base_params, "q_samples": int(q_samples), "noise": False}
+        q_sim, _, i_2d_test, _, _ = run_simulation_core(test_params)
+        diff = i_2d_test - i_2d_ref
+        rel_rmse = float(np.linalg.norm(diff) / max(norm_ref, 1e-12))
+        max_rel = float(np.max(np.abs(diff)) / max(peak_ref, 1e-12))
+        rows.append(
+            {
+                "q_samples": int(q_samples),
+                "q_points_1d": int(len(q_sim)),
+                "rel_rmse_2d": rel_rmse,
+                "max_rel_2d": max_rel,
+            }
+        )
+    return pd.DataFrame(rows), reference_q_samples
 
 
 def _build_simulation_params(
@@ -192,8 +234,9 @@ def _render_extracted_table(analysis_res, analysis_method, theoretical_values):
                 theoretical_values.get("PDI2", 0),
             ]
     elif analysis_method == "Tenor":
+        tenor_unstable = bool(analysis_res.get("tenor_unstable_no_plausible_candidate", False))
         param_list = [
-            "Rg (Apparent Guinier)",
+            "Rg (Apparent Guinier, Intermediate)",
             "Mean Rg (Recovered)",
             "Mean Radius (Recovered)",
             "Weighted Variance",
@@ -204,16 +247,26 @@ def _render_extracted_table(analysis_res, analysis_method, theoretical_values):
         ]
         extracted_numeric = [
             analysis_res.get("Rg_guinier", 0),
-            analysis_res.get("Rg", 0),
-            analysis_res.get("mean_r_rec", 0),
-            analysis_res.get("weighted_v", 0),
-            analysis_res.get("tenor_raw_g1_over_g0", 0),
-            analysis_res.get("tenor_dimless_jg", 0),
-            analysis_res.get("tenor_raw_m1_over_m0", 0),
+            np.nan if tenor_unstable else analysis_res.get("Rg", 0),
+            np.nan if tenor_unstable else analysis_res.get("mean_r_rec", 0),
+            np.nan if tenor_unstable else analysis_res.get("weighted_v", 0),
+            np.nan if tenor_unstable else analysis_res.get("tenor_raw_g1_over_g0", 0),
+            np.nan if tenor_unstable else analysis_res.get("tenor_dimless_jg", 0),
+            np.nan if tenor_unstable else analysis_res.get("tenor_raw_m1_over_m0", 0),
             analysis_res.get("tenor_candidate_count", 0),
         ]
         formats = ["{:.2f} nm", "{:.2f} nm", "{:.2f} nm", "{:.4f}", "{:.2e}", "{:.2e}", "{:.2e}", "{:.0f}"]
-        theory_numeric = None
+        truth_candidates = [
+            analysis_res.get("tenor_truth_rg_app", 0),
+            analysis_res.get("tenor_truth_mean_rg", 0),
+            analysis_res.get("tenor_truth_mean_r", 0),
+            analysis_res.get("tenor_truth_weighted_v", 0),
+            analysis_res.get("tenor_truth_raw_g1_over_g0", 0),
+            analysis_res.get("tenor_truth_dimless_jg", 0),
+            0,
+            analysis_res.get("tenor_truth_candidate_count", 0),
+        ]
+        theory_numeric = truth_candidates if any(np.isfinite(val) and float(val) != 0 for val in truth_candidates) else None
     else:
         param_list = ["Rg (Guinier)", "G (Guinier)"]
         extracted_numeric = [
@@ -223,7 +276,10 @@ def _render_extracted_table(analysis_res, analysis_method, theoretical_values):
         formats = ["{:.2f} nm", "{:.2e}"]
         theory_numeric = None
 
-    extracted_vals = [fmt.format(val) for fmt, val in zip(formats, extracted_numeric)]
+    extracted_vals = [
+        ("n/a" if not np.isfinite(val) else fmt.format(val))
+        for fmt, val in zip(formats, extracted_numeric)
+    ]
     if theory_numeric is None:
         theory_vals = ["n/a"] * len(extracted_vals)
         rel_err_vals = ["n/a"] * len(extracted_vals)
@@ -231,7 +287,9 @@ def _render_extracted_table(analysis_res, analysis_method, theoretical_values):
         theory_vals = [fmt.format(val) for fmt, val in zip(formats, theory_numeric)]
         rel_err_vals = []
         for extracted_val, theory_val in zip(extracted_numeric, theory_numeric):
-            if theory_val != 0:
+            if not np.isfinite(extracted_val) or not np.isfinite(theory_val):
+                rel_err_vals.append("n/a")
+            elif theory_val != 0:
                 rel_err_vals.append(f"{((extracted_val - theory_val) / theory_val):+.2%}")
             else:
                 rel_err_vals.append("n/a")
@@ -373,8 +431,32 @@ def run():
         c17.number_input("phi2", step=0.001, key="phi2", disabled=phi_disabled, help=PARAM_HELP["phi2"])
         c18.number_input("phi3", step=0.001, key="phi3", disabled=phi_disabled, help=PARAM_HELP["phi3"])
         st.caption("Sample choice on the left sets the number-density distribution being simulated. For spheres, the exact-sphere forward model already applies the physical R^6 scattering weighting internally.")
+        st.caption(f"TENOR apparent Guinier estimation now reuses the shared linear 2D->1D reduction and derives its low-q bin count from 1D Bins: { _derive_tenor_guinier_bins(n_bins) }.")
         if analysis_method in {"Tomchuk", "Tenor"} and st.session_state.form_factor_model != "Exact Sphere":
             st.warning("Tomchuk and Tenor are calibrated primarily for sphere forward models; non-sphere forward models are best treated as simulation-only for now.")
+        if st.button("Run q-samples sensitivity check", key="run_q_samples_sensitivity"):
+            with st.spinner("Comparing 2D detector images across q-samples values..."):
+                sensitivity_params = _build_simulation_params(
+                    mode_key=mode_key,
+                    dist_type=dist_type,
+                    mean_rg=mean_rg,
+                    p_val=p_val,
+                    pixels=pixels,
+                    pixel_size_um=pixel_size_um,
+                    sample_detector_distance_cm=sample_detector_distance_cm,
+                    wavelength_nm=wavelength_nm,
+                    q_min=q_min,
+                    q_max=q_max,
+                    n_bins=n_bins,
+                    smearing_x=smearing_x,
+                    smearing_y=smearing_y,
+                    flux=get_forward_flux(st.session_state),
+                    noise=False,
+                    binning_mode=binning_mode,
+                )
+                sensitivity_df, reference_q_samples = _run_q_samples_sensitivity(sensitivity_params)
+                st.session_state["q_samples_sensitivity_df"] = sensitivity_df
+                st.session_state["q_samples_sensitivity_ref"] = int(reference_q_samples)
 
         st.subheader("NNLS")
         c19, c20 = st.columns(2)
@@ -406,11 +488,10 @@ def run():
         recommendation = st.session_state.get("tomchuk_recommendation")
 
         st.subheader("Tenor-SAXS")
-        c21, c22, c23, c24 = st.columns(4)
-        c21.number_input("TENOR Guinier Bins", min_value=32, step=16, key="tenor_guinier_bins", help=PARAM_HELP["tenor_guinier_bins"])
-        c22.number_input("TENOR Radial Bins", min_value=6, step=1, key="tenor_radial_bins", help=PARAM_HELP["tenor_radial_bins"])
-        c23.number_input("TENOR qRg Limit", min_value=0.2, max_value=2.0, step=0.05, key="tenor_qrg_limit", help=PARAM_HELP["tenor_qrg_limit"])
-        c24.number_input("TENOR PSF Pair Count", min_value=1, step=1, key="tenor_psf_count", help=PARAM_HELP["tenor_psf_count"])
+        c21, c22, c23 = st.columns(3)
+        c21.number_input("TENOR Radial Bins", min_value=6, step=1, key="tenor_radial_bins", help=PARAM_HELP["tenor_radial_bins"])
+        c22.number_input("TENOR qRg Limit", min_value=0.2, max_value=2.0, step=0.05, key="tenor_qrg_limit", help=PARAM_HELP["tenor_qrg_limit"])
+        c23.number_input("TENOR PSF Pair Count", min_value=1, step=1, key="tenor_psf_count", help=PARAM_HELP["tenor_psf_count"])
         c25, c26, c27, c28 = st.columns(4)
         c25.number_input("TENOR PSF SigmaX Start", min_value=0.1, step=0.1, key="tenor_psf_sigma_x_start", help=PARAM_HELP["tenor_psf_sigma_x_start"])
         c26.number_input("TENOR PSF SigmaY Start", min_value=0.1, step=0.1, key="tenor_psf_sigma_y_start", help=PARAM_HELP["tenor_psf_sigma_y_start"])
@@ -418,9 +499,11 @@ def run():
         c28.number_input("TENOR Secondary Ratio", min_value=0.1, max_value=1.0, step=0.05, key="tenor_psf_secondary_ratio", help=PARAM_HELP["tenor_psf_secondary_ratio"])
         c29, c30, c31, c32 = st.columns(4)
         c29.number_input("TENOR PSF Truncate", min_value=1.0, step=0.5, key="tenor_psf_truncate", help=PARAM_HELP["tenor_psf_truncate"])
-        c30.number_input("TENOR p Min", min_value=0.001, step=0.01, key="tenor_calibration_p_min", help=PARAM_HELP["tenor_calibration_p_min"])
-        c31.number_input("TENOR p Max", min_value=0.01, step=0.01, key="tenor_calibration_p_max", help=PARAM_HELP["tenor_calibration_p_max"])
-        c32.number_input("TENOR Calibration Points", min_value=4, step=1, key="tenor_calibration_p_count", help=PARAM_HELP["tenor_calibration_p_count"])
+        c30.number_input("TENOR Recon Trials", min_value=1, step=1, key="tenor_reconstruction_trials", help=PARAM_HELP["tenor_reconstruction_trials"])
+        c31.number_input("TENOR p Min", min_value=0.001, step=0.01, key="tenor_calibration_p_min", help=PARAM_HELP["tenor_calibration_p_min"])
+        c32.number_input("TENOR p Max", min_value=0.01, step=0.01, key="tenor_calibration_p_max", help=PARAM_HELP["tenor_calibration_p_max"])
+        c33, c34 = st.columns(2)
+        c33.number_input("TENOR Calibration Points", min_value=4, step=1, key="tenor_calibration_p_count", help=PARAM_HELP["tenor_calibration_p_count"])
         st.checkbox("TENOR Use Cubic G/M", value=st.session_state.tenor_use_g3 and st.session_state.tenor_use_m3, key="tenor_use_cubic_both", help=PARAM_HELP["tenor_use_cubic_both"])
         st.session_state["tenor_use_g3"] = bool(st.session_state.get("tenor_use_cubic_both", False))
         st.session_state["tenor_use_m3"] = bool(st.session_state.get("tenor_use_cubic_both", False))
@@ -620,6 +703,25 @@ def run():
                 st.metric("Tomchuk Path", analysis_res.get("tomchuk_extraction", "n/a"))
             elif analysis_method == "Tenor":
                 st.metric("PSF Candidates", f"{analysis_res.get('tenor_candidate_count', 0)}")
+                if analysis_res.get("tenor_unstable_no_plausible_candidate", False):
+                    st.warning("No physically plausible TENOR quartet was found for this run. The reported recovery may be unstable.")
+                    st.caption(
+                        "What usually helps: improve SNR first, then broaden the candidate evaluation. "
+                        "Increasing TENOR Recon Trials from 1 to about 3-5 can help when some plausible quartets exist. "
+                        "Increasing TENOR Calibration Points alone usually changes the interpolation only slightly. "
+                        "If this warning persists, the current data are likely too noisy for reliable TENOR extraction under the chosen settings."
+                    )
+                if analysis_res.get("tenor_candidate_plausible_count", 0):
+                    st.caption(
+                        f"Plausible TENOR candidates kept: "
+                        f"{analysis_res.get('tenor_candidate_plausible_count', 0)}/"
+                        f"{analysis_res.get('tenor_candidate_count', 0)}"
+                    )
+                if analysis_res.get("tenor_candidate_reconstruction_count", 0):
+                    st.caption(
+                        "Reconstruction-tested quartets: "
+                        f"{analysis_res.get('tenor_candidate_reconstruction_count', 0)}"
+                    )
             _render_extracted_table(analysis_res, analysis_method, theoretical_values)
             if theoretical_values is not None and normalization_scale != 1.0:
                 st.caption(f"Simulated 1D data was normalized by {normalization_scale:.4e} before Tomchuk analysis.")
@@ -639,10 +741,24 @@ def run():
                     width="stretch",
                 )
             elif analysis_method == "Tenor":
-                st.metric("Weighted Variance", f"{analysis_res.get('weighted_v', 0):.4f}")
-                st.metric("Raw g1/g0", f"{analysis_res.get('tenor_raw_g1_over_g0', 0):.2e}")
-                st.metric("Raw g1/g0^2", f"{analysis_res.get('tenor_raw_g100_ratio', 0):.2e}")
-                st.metric("Dimensionless J_G", f"{analysis_res.get('tenor_dimless_jg', 0):.2e}")
+                if analysis_res.get("tenor_unstable_no_plausible_candidate", False):
+                    st.metric("Weighted Variance", "n/a")
+                    st.metric("Raw g1/g0", "n/a")
+                    st.metric("Raw g1/g0^2", "n/a")
+                    st.metric("Dimensionless J_G", "n/a")
+                else:
+                    st.metric("Weighted Variance", f"{analysis_res.get('weighted_v', 0):.4f}")
+                    st.metric("Raw g1/g0", f"{analysis_res.get('tenor_raw_g1_over_g0', 0):.2e}")
+                    st.metric("Raw g1/g0^2", f"{analysis_res.get('tenor_raw_g100_ratio', 0):.2e}")
+                    st.metric("Dimensionless J_G", f"{analysis_res.get('tenor_dimless_jg', 0):.2e}")
+                if np.isfinite(analysis_res.get("tenor_best_recon_rrms_2d", np.nan)):
+                    st.caption(f"Best 2D reconstruction RRMS: {analysis_res.get('tenor_best_recon_rrms_2d', np.nan):.3e}")
+                if analysis_res.get("tenor_truth_weighted_v", None) is not None:
+                    st.caption(
+                        f"Noise-free truth: V={analysis_res.get('tenor_truth_weighted_v', 0):.4f}, "
+                        f"J_G={analysis_res.get('tenor_truth_dimless_jg', 0):.2e}, "
+                        f"p={analysis_res.get('tenor_truth_p', 0):.3f}"
+                    )
             else:
                 st.caption("NNLS diagnostics are represented mainly by the fit error and recovered distribution.")
 
@@ -666,6 +782,24 @@ def run():
                         f"Safety zone q_max={safety['q_max_min']:.2f}-{safety['q_max_max']:.2f}, "
                         f"bins={safety['n_bins_min']}-{safety['n_bins_max']}"
                     )
+
+            sensitivity_df = st.session_state.get("q_samples_sensitivity_df")
+            if sensitivity_df is not None:
+                st.caption(
+                    f"q-samples sensitivity against a deterministic high-resolution reference "
+                    f"(q_samples={st.session_state.get('q_samples_sensitivity_ref', 'n/a')})."
+                )
+                st.dataframe(
+                    sensitivity_df.style.format(
+                        {
+                            "rel_rmse_2d": "{:.3e}",
+                            "max_rel_2d": "{:.3e}",
+                        }
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                    height=240,
+                )
 
         with c6:
             st.markdown("**Recovered Distribution**")

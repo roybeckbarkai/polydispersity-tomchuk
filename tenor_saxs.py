@@ -24,6 +24,7 @@ from scipy.ndimage import gaussian_filter
 from scipy.optimize import bisect
 
 from analysis_utils import estimate_guinier_parameters, get_normalized_moment
+from app_settings import get_forward_flux
 from sim_utils import (
     build_detector_q_grid,
     radial_average_detector_image,
@@ -234,6 +235,22 @@ def fit_weighted_centered_tenor_model(q_sq, chi, log_ratio, intensity_weights, u
     else:
         coeff_centered = solve_triangular(r_mat, q_mat.T @ yw)
 
+    fitted = x @ coeff_centered
+    resid = y - fitted
+    rmse = float(np.sqrt(np.mean(resid**2)))
+
+    # Estimate covariance in the centered basis, following the MATLAB workflow
+    # that grades ratios by their CI95 width.
+    n_obs = x.shape[0]
+    dof = max(n_obs - x.shape[1], 1)
+    sse = float(np.sum((w * resid) ** 2))
+    s2 = sse / dof
+    try:
+        r_inv = np.linalg.solve(r_mat, np.eye(r_mat.shape[0]))
+        cov_centered = s2 * (r_inv @ r_inv.T)
+    except Exception:
+        cov_centered = None
+
     # Map centered G-block coefficients back to the original Q basis.
     k_g = len(g_cols)
     k_m = len(m_cols)
@@ -254,10 +271,7 @@ def fit_weighted_centered_tenor_model(q_sq, chi, log_ratio, intensity_weights, u
         transform[3, 3] = 1.0
     transform[k_g:, k_g:] = np.eye(k_m)
     coeffs = transform @ coeff_centered
-
-    fitted = x @ coeff_centered
-    resid = y - fitted
-    rmse = float(np.sqrt(np.mean(resid**2)))
+    cov_coeffs = None if cov_centered is None else (transform @ cov_centered @ transform.T)
 
     g_coeffs = coeffs[:k_g]
     m_coeffs = coeffs[k_g:]
@@ -271,11 +285,25 @@ def fit_weighted_centered_tenor_model(q_sq, chi, log_ratio, intensity_weights, u
     g100_ratio = g1 / (g0**2) if abs(g0) > 1e-20 else np.nan
     g210_ratio = g2 / (g1 * g0) if abs(g0 * g1) > 1e-20 else np.nan
     m210_ratio = m1 / (m0 * g0) if abs(m0 * g0) > 1e-20 else np.nan
+    g_ratio_ci95_width = np.nan
+    g_ratio_grade = 0.0
+    if cov_coeffs is not None and abs(g0) > 1e-20:
+        grad = np.zeros(k_total, dtype=float)
+        grad[0] = -g1 / (g0**2)
+        if k_total > 1:
+            grad[1] = 1.0 / g0
+        var_ratio = float(grad @ cov_coeffs @ grad.T)
+        if np.isfinite(var_ratio):
+            se_ratio = math.sqrt(max(var_ratio, 0.0))
+            z95 = 1.95996398454005
+            g_ratio_ci95_width = 2.0 * z95 * se_ratio
+            g_ratio_grade = float(1.0 / (1.0 + g_ratio_ci95_width))
 
     return {
         "g_coeffs": g_coeffs,
         "m_coeffs": m_coeffs,
         "fit_rmse": rmse,
+        "fit_sse": sse,
         "q_sq": q_sq,
         "fitted": fitted,
         "mu_q": mu_q,
@@ -283,6 +311,8 @@ def fit_weighted_centered_tenor_model(q_sq, chi, log_ratio, intensity_weights, u
         "raw_g100_ratio": float(g100_ratio),
         "raw_g210_ratio": float(g210_ratio) if np.isfinite(g210_ratio) else np.nan,
         "raw_m210_ratio": float(m210_ratio) if np.isfinite(m210_ratio) else np.nan,
+        "g_ratio_ci95_width": float(g_ratio_ci95_width) if np.isfinite(g_ratio_ci95_width) else np.nan,
+        "g_ratio_grade": float(g_ratio_grade),
     }
 
 
@@ -350,6 +380,7 @@ def extract_pair_observables(
     score = abs(fit_res["fit_rmse"])
     return {
         "pair": pair,
+        "rg_app": float(rg_app),
         "q_vals": np.asarray(np.sqrt(fit_res["q_sq"]), dtype=float),
         "g_radial": np.asarray([], dtype=float),
         "m_radial": np.asarray([], dtype=float),
@@ -364,7 +395,159 @@ def extract_pair_observables(
         "raw_m1_over_m0": float(np.nan),
         "dimless_jg": float(raw_g1_over_g0 / max(rg_app**2, 1e-12)),
         "score": float(score),
+        "grade_g": float(fit_res.get("g_ratio_grade", 0.0)),
+        "g_ratio_ci95_width": float(fit_res.get("g_ratio_ci95_width", np.nan)),
         "q_fit_max": float(q_fit_max),
+    }
+
+
+def _compute_relative_rmse(observed, model, mask=None):
+    observed = np.asarray(observed, dtype=float)
+    model = np.asarray(model, dtype=float)
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        observed = observed[mask]
+        model = model[mask]
+    valid = np.isfinite(observed) & np.isfinite(model)
+    if np.count_nonzero(valid) < 10:
+        return np.inf, 1.0
+    observed = observed[valid]
+    model = model[valid]
+    denom = float(np.dot(model, model))
+    scale = float(np.dot(observed, model) / denom) if denom > 1e-20 else 1.0
+    residual = observed - scale * model
+    norm = max(float(np.linalg.norm(observed)), 1e-12)
+    return float(np.linalg.norm(residual) / norm), scale
+
+
+def _select_reconstruction_candidates(candidates, j_lo, j_hi, reconstruction_trials):
+    reconstruction_trials = max(int(reconstruction_trials), 1)
+    if not candidates:
+        return []
+
+    def candidate_rank(item):
+        j_val = float(item.get("dimless_jg", np.nan))
+        if np.isfinite(j_val):
+            if j_lo <= j_val <= j_hi:
+                distance = 0.0
+            else:
+                distance = min(abs(j_val - j_lo), abs(j_val - j_hi))
+        else:
+            distance = np.inf
+        grade = -float(item.get("grade_g", 0.0))
+        ci_width = float(item.get("g_ratio_ci95_width", np.inf))
+        score = float(item.get("score", np.inf))
+        sigma = float(getattr(item["pair"], "sigma_x_1", np.inf))
+        return (distance, grade, ci_width, score, sigma)
+
+    ranked = sorted(candidates, key=candidate_rank)
+    return ranked[: min(reconstruction_trials, len(ranked))]
+
+
+def _evaluate_reconstruction_candidate(
+    *,
+    candidate,
+    observed_i_2d,
+    q_max,
+    dist_type,
+    initial_rg_guess,
+    calibration_p_grid,
+    guinier_bins,
+    qrg_limit,
+    n_radial_bins,
+    psf_truncate,
+    use_m3,
+    use_g3,
+    simulation_params_for_calibration,
+):
+    calibration = calibrate_p_from_simulation(
+        target_j_g=float(candidate["dimless_jg"]),
+        dist_type=dist_type,
+        q_max=q_max,
+        pixels=observed_i_2d.shape[0],
+        pair=candidate["pair"],
+        mean_rg_ref=initial_rg_guess,
+        p_grid=calibration_p_grid,
+        tenor_settings={
+            "tenor_guinier_bins": guinier_bins,
+            "tenor_qrg_limit": qrg_limit,
+            "tenor_radial_bins": n_radial_bins,
+            "tenor_psf_truncate": psf_truncate,
+            "tenor_use_m3": use_m3,
+            "tenor_use_g3": use_g3,
+        },
+        simulation_params=simulation_params_for_calibration,
+    )
+    if calibration is None:
+        v_weighted = solve_v_from_j_g(float(candidate["dimless_jg"]))
+        p_rec = solve_p_from_weighted_v(v_weighted, dist_type=dist_type)
+    else:
+        v_weighted = float(calibration["weighted_v"])
+        p_rec = float(calibration["p_rec"])
+
+    rg_app = float(simulation_params_for_calibration.get("mean_rg", initial_rg_guess))
+    rg_app = float(candidate.get("rg_app", initial_rg_guess))
+    r0_weighted = rg_app / math.sqrt(max(1.0 + v_weighted, 1e-12))
+    mean_ratio = weighted_mean_to_arithmetic_mean_ratio(p_rec, dist_type)
+    mean_rg = r0_weighted / mean_ratio if mean_ratio > 0 else r0_weighted
+    mean_radius = mean_rg * math.sqrt(5.0 / 3.0)
+
+    sim_params = dict(simulation_params_for_calibration or {})
+    if "flux" not in sim_params:
+        try:
+            sim_params["flux"] = float(get_forward_flux(sim_params))
+        except Exception:
+            sim_params["flux"] = 1e8
+    if "n_bins" not in sim_params:
+        sim_params["n_bins"] = max(int(guinier_bins), 64)
+    if "binning_mode" not in sim_params:
+        sim_params["binning_mode"] = "Logarithmic"
+    if "smearing_x" not in sim_params:
+        sim_params["smearing_x"] = 0.0
+    if "smearing_y" not in sim_params:
+        sim_params["smearing_y"] = 0.0
+    sim_params.update(
+        {
+            "mean_rg": float(mean_rg),
+            "p_val": float(p_rec),
+            "dist_type": dist_type,
+            "mode": "Sphere",
+            "pixels": int(observed_i_2d.shape[0]),
+            "q_min": 0.0,
+            "q_max": float(q_max),
+            "noise": False,
+        }
+    )
+    _, _, recon_i_2d, _, _ = run_simulation_core(sim_params)
+    pixels = observed_i_2d.shape[0]
+    dq = (2.0 * q_max) / max(pixels - 1, 1)
+    _, _, _, q_r, _ = build_detector_q_grid(pixels, q_max=q_max)
+    pair = candidate["pair"]
+    dead_pixels = int(
+        2
+        * max(
+            int(math.ceil(psf_truncate * pair.sigma_x_1)),
+            int(math.ceil(psf_truncate * pair.sigma_y_1)),
+            int(math.ceil(psf_truncate * pair.sigma_x_2)),
+            int(math.ceil(psf_truncate * pair.sigma_y_2)),
+            1,
+        )
+    )
+    q_dead = dead_pixels * abs(dq)
+    q_fit_max = min(q_max, qrg_limit / max(candidate.get("rg_app", initial_rg_guess), 1e-6))
+    fit_mask = (q_r < min(q_fit_max, np.nanmax(q_r) - q_dead)) & (q_r > q_dead)
+    rrms_2d, scale_2d = _compute_relative_rmse(observed_i_2d, recon_i_2d, mask=fit_mask)
+
+    return {
+        "candidate": candidate,
+        "calibration": calibration,
+        "weighted_v": float(v_weighted),
+        "p_rec": float(p_rec),
+        "mean_rg_rec": float(mean_rg),
+        "mean_r_rec": float(mean_radius),
+        "weighted_mean_rg": float(r0_weighted),
+        "recon_rrms_2d": float(rrms_2d),
+        "recon_scale_2d": float(scale_2d),
     }
 
 
@@ -377,6 +560,7 @@ def calibrate_p_from_simulation(
     mean_rg_ref=4.0,
     p_grid=None,
     tenor_settings=None,
+    simulation_params=None,
 ):
     """Recipe-inspired calibration of the observable against forward simulations."""
     if p_grid is None:
@@ -389,55 +573,18 @@ def calibrate_p_from_simulation(
 
     rows = []
     for p_val in p_grid:
-        # Section 4, step 4(a): create ground-truth simulations at different
-        # variances using the same particle form factor and the selected PSF pair.
-        params = {
-            "mean_rg": float(mean_rg_ref),
-            "p_val": float(p_val),
-            "dist_type": dist_type,
-            "mode": "Sphere",
-            "pixels": int(pixels),
-            "q_min": 0.0,
-            "q_max": float(q_max),
-            "n_bins": 256,
-            "smearing_x": 0.0,
-            "smearing_y": 0.0,
-            "flux": 1e8,
-            "noise": False,
-            "binning_mode": "Logarithmic",
-        }
-        if tenor_settings:
-            params["radius_samples"] = int(tenor_settings.get("radius_samples", 400))
-            params["q_samples"] = int(tenor_settings.get("q_samples", 200))
-        _, _, i_2d, _, _ = run_simulation_core(params)
-        guinier = apparent_rg_from_2d(
-            i_2d,
-            q_max=q_max,
-            initial_rg_guess=mean_rg_ref,
-            n_bins=int((tenor_settings or {}).get("tenor_guinier_bins", 256)),
-        )
-        if not guinier["valid"] or guinier["rg_app"] <= 0:
-            continue
-        obs = extract_pair_observables(
-            i_2d,
-            q_max=q_max,
+        row = build_tenor_simulation_row(
+            mean_rg=float(mean_rg_ref),
+            p_val=float(p_val),
+            dist_type=dist_type,
+            q_max=float(q_max),
+            pixels=int(pixels),
             pair=pair,
-            rg_app=guinier["rg_app"],
-            qrg_limit=float((tenor_settings or {}).get("tenor_qrg_limit", 0.85)),
-            n_radial_bins=int((tenor_settings or {}).get("tenor_radial_bins", 18)),
-            psf_truncate=float((tenor_settings or {}).get("tenor_psf_truncate", 4.0)),
-            use_m3=bool((tenor_settings or {}).get("tenor_use_m3", True)),
-            use_g3=bool((tenor_settings or {}).get("tenor_use_g3", True)),
+            tenor_settings=tenor_settings,
+            simulation_params=simulation_params,
         )
-        if obs is None:
-            continue
-        rows.append(
-            {
-                "p_val": float(p_val),
-                "weighted_v": float(weighted_variance_from_p(p_val, dist_type)),
-                "dimless_jg": float(obs["dimless_jg"]),
-            }
-        )
+        if row is not None:
+            rows.append(row)
 
     if len(rows) < 4:
         return None
@@ -466,6 +613,88 @@ def calibrate_p_from_simulation(
     }
 
 
+def build_tenor_simulation_row(
+    *,
+    mean_rg,
+    p_val,
+    dist_type,
+    q_max,
+    pixels,
+    pair,
+    tenor_settings=None,
+    simulation_params=None,
+):
+    """Run the section-4 forward simulation for one p value and extract its observable."""
+    params = {
+        "mean_rg": float(mean_rg),
+        "p_val": float(p_val),
+        "dist_type": dist_type,
+        "mode": "Sphere",
+        "pixels": int(pixels),
+        "q_min": 0.0,
+        "q_max": float(q_max),
+        "n_bins": 256,
+        "smearing_x": 0.0,
+        "smearing_y": 0.0,
+        "flux": 1e8,
+        "noise": False,
+        "binning_mode": "Logarithmic",
+        "radius_samples": int((tenor_settings or {}).get("radius_samples", 400)),
+        "q_samples": int((tenor_settings or {}).get("q_samples", 200)),
+        "form_factor_model": "Exact Sphere",
+        "phi2": SOLID_SPHERE_PHI2,
+        "phi3": 0.0,
+        "ensemble_sampling": "Continuous",
+        "ensemble_members": 11,
+    }
+    if simulation_params:
+        params.update(dict(simulation_params))
+        params["mean_rg"] = float(mean_rg)
+        params["p_val"] = float(p_val)
+        params["dist_type"] = dist_type
+        params["mode"] = "Sphere"
+        params["pixels"] = int(pixels)
+        params["q_min"] = 0.0
+        params["q_max"] = float(q_max)
+        params["noise"] = False
+    _, _, i_2d, _, _ = run_simulation_core(params)
+    guinier = apparent_rg_from_2d(
+        i_2d,
+        q_max=q_max,
+        initial_rg_guess=mean_rg,
+        n_bins=int((tenor_settings or {}).get("tenor_guinier_bins", 256)),
+    )
+    if not guinier["valid"] or guinier["rg_app"] <= 0:
+        return None
+    obs = extract_pair_observables(
+        i_2d,
+        q_max=q_max,
+        pair=pair,
+        rg_app=guinier["rg_app"],
+        qrg_limit=float((tenor_settings or {}).get("tenor_qrg_limit", 0.85)),
+        n_radial_bins=int((tenor_settings or {}).get("tenor_radial_bins", 18)),
+        psf_truncate=float((tenor_settings or {}).get("tenor_psf_truncate", 4.0)),
+        use_m3=bool((tenor_settings or {}).get("tenor_use_m3", True)),
+        use_g3=bool((tenor_settings or {}).get("tenor_use_g3", True)),
+    )
+    if obs is None:
+        return None
+    return {
+        "p_val": float(p_val),
+        "weighted_v": float(weighted_variance_from_p(p_val, dist_type)),
+        "dimless_jg": float(obs["dimless_jg"]),
+        "raw_g1_over_g0": float(obs["raw_g1_over_g0"]),
+        "raw_g100_ratio": float(obs["raw_g100_ratio"]),
+        "raw_g210_ratio": float(obs["raw_g210_ratio"]),
+        "raw_m210_ratio": float(obs["raw_m210_ratio"]),
+        "raw_m1_over_m0": float(obs["raw_m1_over_m0"]),
+        "rg_app": float(guinier["rg_app"]),
+        "g_app": float(guinier["g_app"]),
+        "pair": pair,
+        "candidate_count": 1,
+    }
+
+
 def analyze_tenor_saxs_2d(
     i_2d,
     q_max,
@@ -480,6 +709,8 @@ def analyze_tenor_saxs_2d(
     psf_truncate=4.0,
     use_m3=True,
     use_g3=True,
+    simulation_params_for_calibration=None,
+    reconstruction_trials=1,
 ):
     """Estimate mean Rg and p from a 2D pattern using the TENOR-SAXS recipe."""
     i_2d = np.asarray(i_2d, dtype=float)
@@ -526,41 +757,84 @@ def analyze_tenor_saxs_2d(
     if not candidates:
         raise ValueError("TENOR-SAXS could not find a usable PSF pair for the supplied 2D data.")
 
-    best = min(candidates, key=lambda item: item["score"])
-    observable_dimless_jg = best["dimless_jg"]
-
-    # Section 4, step 4: calibrate the selected observable against forward
-    # simulations of the same form-factor family and PSF quartet.
-    calibration = calibrate_p_from_simulation(
-        target_j_g=observable_dimless_jg,
-        dist_type=dist_type,
-        q_max=q_max,
-        pixels=i_2d.shape[0],
-        pair=best["pair"],
-        mean_rg_ref=initial_rg_guess,
-        p_grid=calibration_p_grid,
-        tenor_settings={
-            "tenor_guinier_bins": guinier_bins,
-            "tenor_qrg_limit": qrg_limit,
-            "tenor_radial_bins": n_radial_bins,
-            "tenor_psf_truncate": psf_truncate,
-            "tenor_use_m3": use_m3,
-            "tenor_use_g3": use_g3,
-        },
-    )
-    if calibration is None:
-        v_weighted = solve_v_from_j_g(observable_dimless_jg, phi2=phi2)
-        p_rec = solve_p_from_weighted_v(v_weighted, dist_type=dist_type)
+    if calibration_p_grid is not None and len(calibration_p_grid) > 0:
+        v_max_plausible = max(
+            weighted_variance_from_p(float(np.max(calibration_p_grid)), dist_type),
+            1e-6,
+        )
     else:
-        v_weighted = float(calibration["weighted_v"])
-        p_rec = float(calibration["p_rec"])
+        v_max_plausible = 0.8
+    j_bounds = sorted(
+        [
+            dimless_jg_from_v(0.0, phi2=phi2),
+            dimless_jg_from_v(v_max_plausible, phi2=phi2),
+        ]
+    )
+    j_lo, j_hi = j_bounds[0], j_bounds[1]
+    plausible_candidates = [
+        item
+        for item in candidates
+        if np.isfinite(item["dimless_jg"]) and (j_lo <= item["dimless_jg"] <= j_hi)
+    ]
+    reconstruction_trials = max(int(reconstruction_trials), 1)
+    candidate_subset = _select_reconstruction_candidates(
+        plausible_candidates if plausible_candidates else candidates,
+        j_lo=j_lo,
+        j_hi=j_hi,
+        reconstruction_trials=reconstruction_trials,
+    )
 
-    # Section 4 closing step: convert the weighted Guinier size back to the
-    # reported arithmetic-mean ensemble size once the variance is known.
-    r0_weighted = rg_app / math.sqrt(max(1.0 + v_weighted, 1e-12))
-    mean_ratio = weighted_mean_to_arithmetic_mean_ratio(p_rec, dist_type)
-    mean_rg = r0_weighted / mean_ratio if mean_ratio > 0 else r0_weighted
-    mean_radius = mean_rg * math.sqrt(5.0 / 3.0)
+    trial_rows = []
+    best_eval = None
+    for candidate in candidate_subset:
+        eval_row = _evaluate_reconstruction_candidate(
+            candidate=candidate,
+            observed_i_2d=i_2d,
+            q_max=q_max,
+            dist_type=dist_type,
+            initial_rg_guess=initial_rg_guess,
+            calibration_p_grid=calibration_p_grid,
+            guinier_bins=guinier_bins,
+            qrg_limit=qrg_limit,
+            n_radial_bins=n_radial_bins,
+            psf_truncate=psf_truncate,
+            use_m3=use_m3,
+            use_g3=use_g3,
+            simulation_params_for_calibration=simulation_params_for_calibration,
+        )
+        trial_rows.append(
+            {
+                "pair": candidate["pair"],
+                "dimless_jg": float(candidate["dimless_jg"]),
+                "score": float(candidate["score"]),
+                "grade_g": float(candidate.get("grade_g", 0.0)),
+                "recon_rrms_2d": float(eval_row["recon_rrms_2d"]),
+                "p_rec": float(eval_row["p_rec"]),
+                "mean_rg_rec": float(eval_row["mean_rg_rec"]),
+            }
+        )
+        if best_eval is None or (
+            eval_row["recon_rrms_2d"],
+            -candidate.get("grade_g", 0.0),
+            candidate["score"],
+        ) < (
+            best_eval["recon_rrms_2d"],
+            -best_eval["candidate"].get("grade_g", 0.0),
+            best_eval["candidate"]["score"],
+        ):
+            best_eval = eval_row
+
+    if best_eval is None:
+        raise ValueError("TENOR-SAXS could not evaluate any reconstruction candidates.")
+
+    best = best_eval["candidate"]
+    observable_dimless_jg = best["dimless_jg"]
+    calibration = best_eval["calibration"]
+    v_weighted = float(best_eval["weighted_v"])
+    p_rec = float(best_eval["p_rec"])
+    r0_weighted = float(best_eval["weighted_mean_rg"])
+    mean_rg = float(best_eval["mean_rg_rec"])
+    mean_radius = float(best_eval["mean_r_rec"])
 
     return {
         "method": "TENOR-SAXS",
@@ -586,6 +860,12 @@ def analyze_tenor_saxs_2d(
         "best_m_coeffs": best["m_coeffs"],
         "q_fit_max": float(best["q_fit_max"]),
         "candidate_count": len(candidates),
+        "candidate_plausible_count": len(plausible_candidates),
+        "unstable_no_plausible_candidate": len(plausible_candidates) == 0,
+        "candidate_reconstruction_count": len(candidate_subset),
+        "candidate_trials": trial_rows,
+        "best_recon_rrms_2d": float(best_eval["recon_rrms_2d"]),
+        "best_recon_scale_2d": float(best_eval["recon_scale_2d"]),
         "calibration_rows": [] if calibration is None else calibration["rows"],
         "guinier_profile_q": guinier["q_1d"],
         "guinier_profile_i": guinier["i_1d"],
@@ -593,3 +873,89 @@ def analyze_tenor_saxs_2d(
         "g_radial": best["g_radial"],
         "m_radial": best["m_radial"],
     }
+
+
+def simulate_tenor_ground_truth(
+    *,
+    mean_rg,
+    p_val,
+    dist_type,
+    q_max,
+    pixels,
+    pixel_size_um=None,
+    sample_detector_distance_cm=None,
+    wavelength_nm=None,
+    psf_pairs=None,
+    phi2=SOLID_SPHERE_PHI2,
+    n_radial_bins=18,
+    qrg_limit=0.85,
+    guinier_bins=256,
+    calibration_p_grid=None,
+    psf_truncate=4.0,
+    use_m3=True,
+    use_g3=True,
+    radius_samples=400,
+    q_samples=200,
+    form_factor_model="Exact Sphere",
+    ensemble_sampling="Continuous",
+    ensemble_members=11,
+    simulation_params=None,
+):
+    """Generate TENOR-SAXS truth values from the current noise-free simulation details."""
+    sim_params = {
+        "mean_rg": float(mean_rg),
+        "p_val": float(p_val),
+        "dist_type": dist_type,
+        "mode": "Sphere",
+        "pixels": int(pixels),
+        "pixel_size_um": pixel_size_um,
+        "sample_detector_distance_cm": sample_detector_distance_cm,
+        "wavelength_nm": wavelength_nm,
+        "q_min": 0.0,
+        "q_max": float(q_max),
+        "n_bins": max(int(guinier_bins), 64),
+        "smearing_x": 0.0,
+        "smearing_y": 0.0,
+        "flux": 1e8,
+        "noise": False,
+        "binning_mode": "Linear",
+        "radius_samples": int(radius_samples),
+        "q_samples": int(q_samples),
+        "form_factor_model": form_factor_model,
+        "phi2": float(phi2),
+        "phi3": 0.0,
+        "ensemble_sampling": ensemble_sampling,
+        "ensemble_members": int(ensemble_members),
+    }
+    if simulation_params:
+        sim_params.update(dict(simulation_params))
+        sim_params["mean_rg"] = float(mean_rg)
+        sim_params["p_val"] = float(p_val)
+        sim_params["dist_type"] = dist_type
+        sim_params["mode"] = "Sphere"
+        sim_params["pixels"] = int(pixels)
+        sim_params["q_min"] = 0.0
+        sim_params["q_max"] = float(q_max)
+        sim_params["noise"] = False
+    _, _, i_2d_truth, _, _ = run_simulation_core(sim_params)
+    truth = analyze_tenor_saxs_2d(
+        i_2d=i_2d_truth,
+        q_max=float(q_max),
+        dist_type=dist_type,
+        initial_rg_guess=float(mean_rg),
+        psf_pairs=psf_pairs,
+        phi2=float(phi2),
+        n_radial_bins=int(n_radial_bins),
+        qrg_limit=float(qrg_limit),
+        guinier_bins=int(guinier_bins),
+        calibration_p_grid=calibration_p_grid,
+        psf_truncate=float(psf_truncate),
+        use_m3=bool(use_m3),
+        use_g3=bool(use_g3),
+        simulation_params_for_calibration=sim_params,
+    )
+    truth["weighted_v_true_from_input"] = float(weighted_variance_from_p(p_val, dist_type))
+    truth["p_true_from_input"] = float(p_val)
+    truth["mean_rg_true_from_input"] = float(mean_rg)
+    truth["mean_r_true_from_input"] = float(mean_rg * math.sqrt(5.0 / 3.0))
+    return truth

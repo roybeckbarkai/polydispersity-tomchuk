@@ -28,7 +28,7 @@
     },
     "flux_exp": {
       "_comment": "Base-10 exponent used in scientific notation for the central-pixel flux target.",
-      "value": 9
+      "value": 6
     },
     "flux_pre": {
       "_comment": "Mantissa used in scientific notation for the central-pixel flux target.",
@@ -40,7 +40,7 @@
     },
     "mean_rg": {
       "_comment": "Mean radius of gyration of the simulated ensemble, in the app's working length units.",
-      "value": 3.872983346207417
+      "value": 3.950443013131565
     },
     "n_bins": {
       "_comment": "Number of q bins used when reducing the detector image to a 1D intensity profile.",
@@ -126,10 +126,6 @@
       "_comment": "Minimum p value included in the Tenor-SAXS simulation calibration grid.",
       "value": 0.01
     },
-    "tenor_guinier_bins": {
-      "_comment": "Number of radial bins used when estimating the apparent Guinier radius for Tenor-SAXS.",
-      "value": 256
-    },
     "tenor_psf_count": {
       "_comment": "Number of PSF quartets scanned when searching for a stable Tenor-SAXS observable extraction.",
       "value": 20
@@ -161,6 +157,10 @@
     "tenor_radial_bins": {
       "_comment": "Number of radial sectors used in the Tenor-SAXS observable extraction workflow.",
       "value": 180
+    },
+    "tenor_reconstruction_trials": {
+      "_comment": "Number of candidate TENOR quartets that are carried into the reconstruction-validation stage. The code ranks quartets by physical plausibility and fit quality, then re-simulates these candidates and keeps the one whose reconstructed 2D data best matches the raw detector image.",
+      "value": 10
     },
     "tenor_use_g3": {
       "_comment": "Whether the Tenor-SAXS G(Q) fit includes a cubic-in-Q term. The MATLAB working3_26 example keeps this off, so the default is False.",
