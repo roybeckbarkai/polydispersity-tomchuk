@@ -10,6 +10,15 @@ import numpy as np
 
 SETTINGS_FILE = Path(__file__).resolve().parent / "app_settings.json"
 
+EXCLUDED_SESSION_KEYS = {
+    "page",
+    "batch_df",
+    "tomchuk_recommendation",
+    "q_samples_sensitivity_df",
+    "q_samples_sensitivity_ref",
+    "uploaded_batch",
+}
+
 
 DEFAULT_APP_SETTINGS = {
     "sim_mode": "Polydisperse Spheres",
@@ -107,15 +116,52 @@ PARAMETER_DESCRIPTIONS = {
 }
 
 
+def _is_persistable_value(value):
+    if isinstance(value, np.generic):
+        value = value.item()
+    if value is None:
+        return True
+    if isinstance(value, (bool, int, float, str)):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_is_persistable_value(item) for item in value)
+    return False
+
+
+def _normalize_persistable_value(value):
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, tuple):
+        return [_normalize_persistable_value(item) for item in value]
+    if isinstance(value, list):
+        return [_normalize_persistable_value(item) for item in value]
+    return value
+
+
+def _iter_persisted_keys(settings_map):
+    keys = list(DEFAULT_APP_SETTINGS.keys())
+    extra_keys = []
+    for key in settings_map.keys():
+        if key in DEFAULT_APP_SETTINGS:
+            continue
+        if key in EXCLUDED_SESSION_KEYS or str(key).startswith("_"):
+            continue
+        value = settings_map.get(key)
+        if _is_persistable_value(value):
+            extra_keys.append(str(key))
+    keys.extend(sorted(extra_keys))
+    return keys
+
+
 def _build_settings_payload(settings_map):
     settings_block = {}
-    for key, default_value in DEFAULT_APP_SETTINGS.items():
+    for key in _iter_persisted_keys(settings_map):
+        default_value = DEFAULT_APP_SETTINGS.get(key)
         value = settings_map.get(key, default_value)
-        if isinstance(value, np.generic):
-            value = value.item()
+        value = _normalize_persistable_value(value)
         settings_block[key] = {
             "value": value,
-            "_comment": PARAMETER_DESCRIPTIONS.get(key, ""),
+            "_comment": PARAMETER_DESCRIPTIONS.get(key, "Persisted Streamlit widget value."),
         }
     return {
         "_format": "app_settings_v2",
@@ -136,7 +182,7 @@ def load_persisted_settings():
     settings_block = payload.get("settings")
     if isinstance(settings_block, dict):
         parsed = {}
-        for key in DEFAULT_APP_SETTINGS:
+        for key in settings_block:
             entry = settings_block.get(key)
             if isinstance(entry, dict) and "value" in entry:
                 parsed[key] = entry["value"]
@@ -151,7 +197,7 @@ def load_persisted_settings():
             except Exception:
                 pass
         return parsed
-    parsed = {key: payload[key] for key in DEFAULT_APP_SETTINGS if key in payload}
+    parsed = {key: payload[key] for key in payload if key not in {"_format", "_comment"}}
     if "pixel_size_um" not in parsed and "detector_side_cm" in payload:
         pixels = parsed.get("pixels", DEFAULT_APP_SETTINGS["pixels"])
         try:
@@ -165,6 +211,9 @@ def hydrate_session_state_from_disk(session_state):
     persisted = load_persisted_settings()
     for key, value in DEFAULT_APP_SETTINGS.items():
         session_state[key] = persisted.get(key, value)
+    for key, value in persisted.items():
+        if key not in EXCLUDED_SESSION_KEYS and not str(key).startswith("_"):
+            session_state[key] = value
     session_state["_settings_initialized_from_disk"] = True
 
 
@@ -177,6 +226,9 @@ def ensure_session_state_defaults(session_state):
     for key, value in DEFAULT_APP_SETTINGS.items():
         if key not in session_state:
             session_state[key] = persisted.get(key, value)
+    for key, value in persisted.items():
+        if key not in session_state and key not in EXCLUDED_SESSION_KEYS and not str(key).startswith("_"):
+            session_state[key] = value
 
 
 def persist_app_settings(session_state):

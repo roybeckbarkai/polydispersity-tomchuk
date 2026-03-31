@@ -16,7 +16,7 @@
     },
     "dist_type": {
       "_comment": "Probability distribution family used to generate the ensemble. Allowed values: 'Gaussian', 'Lognormal', 'Schulz', 'Boltzmann', 'Triangular', 'Uniform'.",
-      "value": "Gaussian"
+      "value": "Boltzmann"
     },
     "ensemble_members": {
       "_comment": "Number of representative sizes kept when Ensemble Sampling is set to Discrete. This value is ignored in Continuous mode, where the simulator integrates across the full radius_samples grid instead of selecting a finite member list.",
@@ -26,9 +26,13 @@
       "_comment": "Whether the ensemble is integrated continuously or approximated with a finite number of members. Allowed values: 'Continuous', 'Discrete'.",
       "value": "Continuous"
     },
+    "eval_tomchuk_grid": {
+      "_comment": "Persisted Streamlit widget value.",
+      "value": false
+    },
     "flux_exp": {
       "_comment": "Base-10 exponent used in scientific notation for the central-pixel flux target.",
-      "value": 6
+      "value": 4
     },
     "flux_pre": {
       "_comment": "Mantissa used in scientific notation for the central-pixel flux target.",
@@ -64,7 +68,7 @@
     },
     "p_val": {
       "_comment": "Polydispersity parameter used to define the width of the selected size distribution.",
-      "value": 0.2
+      "value": 0.4
     },
     "phi2": {
       "_comment": "Second-order curvature coefficient used only by the Guinier Curvature forward model. It is ignored by Exact Sphere, Exact Gaussian Chain, Exact Shell, Exact Thin Rod, and Exact Thin Disk, because those models already define their own full q dependence.",
@@ -97,6 +101,10 @@
     "radius_samples": {
       "_comment": "Number of radius or Rg support points used to build the size grid before simulation. This matters mainly for Continuous ensemble sampling, where the distribution is integrated across the full grid. In Discrete sampling, this still defines the candidate grid, but the simulator keeps only ensemble_members representative points.",
       "value": 2000
+    },
+    "run_q_samples_sensitivity": {
+      "_comment": "Persisted Streamlit widget value.",
+      "value": false
     },
     "sample_detector_distance_cm": {
       "_comment": "Sample-to-detector distance used to convert detector position into q, in centimeters.",
@@ -156,11 +164,15 @@
     },
     "tenor_radial_bins": {
       "_comment": "Number of radial sectors used in the Tenor-SAXS observable extraction workflow.",
-      "value": 180
+      "value": 20
     },
     "tenor_reconstruction_trials": {
       "_comment": "Number of candidate TENOR quartets that are carried into the reconstruction-validation stage. The code ranks quartets by physical plausibility and fit quality, then re-simulates these candidates and keeps the one whose reconstructed 2D data best matches the raw detector image.",
-      "value": 10
+      "value": 5
+    },
+    "tenor_use_cubic_both": {
+      "_comment": "Persisted Streamlit widget value.",
+      "value": true
     },
     "tenor_use_g3": {
       "_comment": "Whether the Tenor-SAXS G(Q) fit includes a cubic-in-Q term. The MATLAB working3_26 example keeps this off, so the default is False.",
@@ -173,6 +185,10 @@
     "tomchuk_target_abs_error": {
       "_comment": "Target absolute fitting tolerance used by the Tomchuk recovery procedure.",
       "value": 0.001
+    },
+    "use_loaded_data": {
+      "_comment": "Persisted Streamlit widget value.",
+      "value": false
     },
     "wavelength_nm": {
       "_comment": "Beam wavelength used to convert detector position into q, in nanometers.",
