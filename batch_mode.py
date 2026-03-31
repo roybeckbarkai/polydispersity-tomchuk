@@ -20,7 +20,7 @@ from analysis_utils import (
     get_header_string,
     run_simulation_analysis_case,
 )
-from app_settings import DEFAULT_APP_SETTINGS
+from app_settings import DEFAULT_APP_SETTINGS, persist_app_settings
 from sim_utils import get_detector_q_max
 
 
@@ -87,7 +87,7 @@ def _default_row(settings_like=None):
         "sample_detector_distance_cm": str(settings_like["sample_detector_distance_cm"]),
         "wavelength_nm": str(settings_like["wavelength_nm"]),
         "q_min": str(settings_like["q_min"]),
-        "q_max": str(min(float(settings_like["q_max"]), float(detector_q_max))),
+        "q_max": str(float(detector_q_max)),
         "n_bins": str(settings_like["n_bins"]),
         "binning (Log/Lin)": "Log",
         "smearing_x": str(settings_like["smearing_x"]),
@@ -124,6 +124,7 @@ def _default_row(settings_like=None):
 def run():
     st.header("Batch Simulation Runner")
     if st.button("Return to Home"):
+        persist_app_settings(st.session_state)
         st.session_state.page = "home"
         st.rerun()
 

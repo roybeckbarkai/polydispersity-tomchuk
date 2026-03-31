@@ -41,17 +41,17 @@ DEFAULT_APP_SETTINGS = {
     "phi3": 0.0,
     "ensemble_sampling": "Discrete",
     "ensemble_members": 41,
-    "tenor_guinier_bins": 32,
-    "tenor_radial_bins": 20,
-    "tenor_qrg_limit": 1.0,
-    "tenor_psf_count": 10,
-    "tenor_psf_truncate": 1.0,
-    "tenor_psf_sigma_x_start": 2.0,
-    "tenor_psf_sigma_y_start": 2.0,
-    "tenor_psf_sigma_step": 0.5,
+    "tenor_guinier_bins": 256,
+    "tenor_radial_bins": 18,
+    "tenor_qrg_limit": 0.85,
+    "tenor_psf_count": 5,
+    "tenor_psf_truncate": 4.0,
+    "tenor_psf_sigma_x_start": 1.2,
+    "tenor_psf_sigma_y_start": 0.6,
+    "tenor_psf_sigma_step": 0.4,
     "tenor_psf_secondary_ratio": 0.5,
-    "tenor_use_g3": True,
-    "tenor_use_m3": True,
+    "tenor_use_g3": False,
+    "tenor_use_m3": False,
     "tenor_calibration_p_min": 0.01,
     "tenor_calibration_p_max": 1.0,
     "tenor_calibration_p_count": 15,
@@ -73,7 +73,7 @@ PARAMETER_DESCRIPTIONS = {
     "sample_detector_distance_cm": "Sample-to-detector distance used to convert detector position into q, in centimeters.",
     "wavelength_nm": "Beam wavelength used to convert detector position into q, in nanometers.",
     "q_min": "Minimum q value included in the generated or analyzed 1D profile.",
-    "q_max": "Maximum q value kept in the 1D profile and downstream analysis. The effective value is clipped to the instrument-derived detector q limit.",
+    "q_max": "Maximum q value used by the current analysis target. In the single-run GUI this is derived automatically from the actual data: detector-limited q_max for simulated data, or the last q point for uploaded 1D data.",
     "n_bins": "Number of q bins used when reducing the detector image to a 1D intensity profile.",
     "binning_mode": "Whether the 1D q bins are spaced linearly or logarithmically. Allowed values: 'Linear', 'Logarithmic'.",
     "smearing_x": "Gaussian detector smearing width along the horizontal detector axis, in pixels.",
@@ -82,13 +82,13 @@ PARAMETER_DESCRIPTIONS = {
     "flux_exp": "Base-10 exponent used in scientific notation for the central-pixel flux target.",
     "optimal_flux": "Whether the app should override the user flux and choose an internally optimized flux value.",
     "add_noise": "Whether Poisson counting noise is added to the simulated detector data.",
-    "radius_samples": "Number of radius or Rg support points used to build continuous ensemble distributions.",
-    "q_samples": "Number of q samples used internally when evaluating model form factors before detector binning.",
+    "radius_samples": "Number of radius or Rg support points used to build the size grid before simulation. This matters mainly for Continuous ensemble sampling, where the distribution is integrated across the full grid. In Discrete sampling, this still defines the candidate grid, but the simulator keeps only ensemble_members representative points.",
+    "q_samples": "Number of internal q samples used when evaluating the forward model before interpolation onto the detector. Increase this when the form factor has structure or oscillations, or when you want smoother detector interpolation. It matters much less for low-q Guinier-only work than for broad-q exact form-factor simulations.",
     "form_factor_model": "Forward model used for the particle form factor. Allowed values: 'Exact Sphere', 'Guinier Curvature', 'Exact Gaussian Chain', 'Exact Shell', 'Exact Thin Rod', 'Exact Thin Disk'.",
-    "phi2": "Second-order correction coefficient used by the Guinier-curvature forward model.",
-    "phi3": "Third-order correction coefficient used by the Guinier-curvature forward model.",
+    "phi2": "Second-order curvature coefficient used only by the Guinier Curvature forward model. It is ignored by Exact Sphere, Exact Gaussian Chain, Exact Shell, Exact Thin Rod, and Exact Thin Disk, because those models already define their own full q dependence.",
+    "phi3": "Third-order curvature coefficient used only by the Guinier Curvature forward model. It is ignored by the exact form-factor models and can usually stay at zero unless you are intentionally using the truncated Guinier-curvature expansion.",
     "ensemble_sampling": "Whether the ensemble is integrated continuously or approximated with a finite number of members. Allowed values: 'Continuous', 'Discrete'.",
-    "ensemble_members": "Number of discrete ensemble members used when finite ensemble sampling is selected.",
+    "ensemble_members": "Number of representative sizes kept when Ensemble Sampling is set to Discrete. This value is ignored in Continuous mode, where the simulator integrates across the full radius_samples grid instead of selecting a finite member list.",
     "tenor_guinier_bins": "Number of radial bins used when estimating the apparent Guinier radius for Tenor-SAXS.",
     "tenor_radial_bins": "Number of radial sectors used in the Tenor-SAXS observable extraction workflow.",
     "tenor_qrg_limit": "Upper qRg cutoff used when selecting the apparent Guinier fitting region for Tenor-SAXS.",
@@ -98,8 +98,8 @@ PARAMETER_DESCRIPTIONS = {
     "tenor_psf_sigma_y_start": "Starting vertical PSF sigma for the Tenor-SAXS PSF scan, in pixels.",
     "tenor_psf_sigma_step": "Increment applied between successive Tenor-SAXS PSF scan candidates, in pixels.",
     "tenor_psf_secondary_ratio": "Relative width factor used to define the secondary PSF in each Tenor-SAXS quartet.",
-    "tenor_use_g3": "Whether the Tenor-SAXS G(Q) fit includes the cubic-in-Q term used in the MATLAB workflow.",
-    "tenor_use_m3": "Whether the Tenor-SAXS M(Q) fit includes the cubic-in-Q term used in the MATLAB workflow.",
+    "tenor_use_g3": "Whether the Tenor-SAXS G(Q) fit includes a cubic-in-Q term. The MATLAB working3_26 example keeps this off, so the default is False.",
+    "tenor_use_m3": "Whether the Tenor-SAXS M(Q) fit includes a cubic-in-Q term. The MATLAB working3_26 example keeps this off, so the default is False.",
     "tenor_calibration_p_min": "Minimum p value included in the Tenor-SAXS simulation calibration grid.",
     "tenor_calibration_p_max": "Maximum p value included in the Tenor-SAXS simulation calibration grid.",
     "tenor_calibration_p_count": "Number of p values sampled in the Tenor-SAXS simulation calibration grid.",
@@ -161,7 +161,18 @@ def load_persisted_settings():
     return parsed
 
 
+def hydrate_session_state_from_disk(session_state):
+    persisted = load_persisted_settings()
+    for key, value in DEFAULT_APP_SETTINGS.items():
+        session_state[key] = persisted.get(key, value)
+    session_state["_settings_initialized_from_disk"] = True
+
+
 def ensure_session_state_defaults(session_state):
+    if not session_state.get("_settings_initialized_from_disk", False):
+        hydrate_session_state_from_disk(session_state)
+        return
+
     persisted = load_persisted_settings()
     for key, value in DEFAULT_APP_SETTINGS.items():
         if key not in session_state:

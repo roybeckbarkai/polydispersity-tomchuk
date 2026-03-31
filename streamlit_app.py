@@ -5,15 +5,21 @@
 import streamlit as st
 import single_mode
 import batch_mode
-from app_settings import ensure_session_state_defaults, persist_app_settings
+from app_settings import ensure_session_state_defaults, hydrate_session_state_from_disk, persist_app_settings
 
 st.set_page_config(page_title="SAXS Simulator", layout="wide", page_icon="⚛️")
 
 # --- Global Session State Initialization ---
 if 'page' not in st.session_state:
     st.session_state.page = 'home'
+if '_reload_settings_from_disk' not in st.session_state:
+    st.session_state._reload_settings_from_disk = True
 
 ensure_session_state_defaults(st.session_state)
+
+if st.session_state.get("_reload_settings_from_disk", False):
+    hydrate_session_state_from_disk(st.session_state)
+    st.session_state._reload_settings_from_disk = False
 
 # --- Navigation Logic ---
 if st.session_state.page == 'home':
@@ -27,6 +33,7 @@ if st.session_state.page == 'home':
         st.info("**Single Run & Interactive Analysis**")
         st.markdown("Simulate one dataset, adjust parameters in real-time, and visualize 1D/2D results interactively.")
         if st.button("Start Single Mode", width="stretch"):
+            st.session_state._reload_settings_from_disk = True
             st.session_state.page = 'single'
             st.rerun()
             
@@ -34,6 +41,7 @@ if st.session_state.page == 'home':
         st.success("**Batch Processing**")
         st.markdown("Run multiple simulations automatically by defining parameter sweeps in a table.")
         if st.button("Start Batch Mode", width="stretch"):
+            st.session_state._reload_settings_from_disk = True
             st.session_state.page = 'batch'
             st.rerun()
 

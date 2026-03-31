@@ -7,7 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from app_settings import ensure_session_state_defaults, get_forward_flux
+from app_settings import ensure_session_state_defaults, get_forward_flux, persist_app_settings
 from analysis_utils import (
     build_reconstruction_quality_summary,
     build_sanity_summary_row,
@@ -37,20 +37,20 @@ PARAM_HELP = {
     "sample_detector_distance_cm": "Distance from sample to detector in centimeters. Larger distance reduces the q range covered by a fixed detector.",
     "wavelength_nm": "Beam wavelength in nanometers. This sets how detector angles convert into scattering vector q.",
     "q_min": "Lowest q kept when reducing the 2D detector image to a 1D curve.",
-    "q_max": "Highest q kept for the 1D profile and analysis. It cannot exceed the instrument-derived detector limit.",
+    "q_max": "This value is derived automatically from the current data. For simulated data it is the instrument-limited detector q max. For uploaded 1D data it becomes the largest q point in the loaded curve.",
     "n_bins": "Number of bins used to radially average the 2D detector into a 1D profile.",
     "binning_mode": "Choose whether 1D q bins are spaced linearly or logarithmically.",
     "smearing_x": "Gaussian instrumental smearing width along the detector x axis, in pixels.",
     "smearing_y": "Gaussian instrumental smearing width along the detector y axis, in pixels.",
     "optimal_flux": "If enabled, the simulation stays deterministic and Poisson counting noise is disabled.",
     "add_noise": "If enabled, Poisson counting noise is applied after scaling the detector to the requested flux.",
-    "radius_samples": "Number of support points used to represent the underlying size distribution during simulation.",
-    "q_samples": "Number of internal q points used before mapping the intensity onto the detector grid.",
-    "ensemble_members": "Number of discrete ensemble members used when discrete sampling is selected.",
+    "radius_samples": "Number of support points used to build the radius or Rg grid before simulation. This matters most in Continuous sampling, where the distribution is integrated over the whole grid. In Discrete sampling it still defines the candidate grid, but only the requested number of ensemble members are retained.",
+    "q_samples": "Number of internal q points used to evaluate the forward model before detector interpolation. Increase it for broad-q simulations or oscillatory exact form factors. It matters much less for low-q-only Guinier-like simulations.",
+    "ensemble_members": "Number of representative sizes used only when Ensemble Sampling is set to Discrete. In Continuous mode this setting is effectively ignored because the code integrates over the full radius_samples grid instead.",
     "form_factor_model": "Scattering kernel used to simulate the chosen sample family. The left panel defines what sample is present, and the forward model defines how that sample scatters.",
     "ensemble_sampling": "Choose whether the distribution is treated continuously or approximated by a finite number of representative members.",
-    "phi2": "Second-order curvature coefficient used by the Guinier-curvature forward model.",
-    "phi3": "Third-order curvature coefficient used by the Guinier-curvature forward model.",
+    "phi2": "Second-order curvature coefficient used only by the Guinier Curvature forward model. It is ignored for Exact Sphere and the other exact form-factor models.",
+    "phi3": "Third-order curvature coefficient used only by the Guinier Curvature forward model. It is ignored for Exact Sphere and the other exact form-factor models, so you usually do not need it unless you intentionally choose the curvature expansion.",
     "nnls_basis_count": "Number of basis functions used in the NNLS inversion.",
     "nnls_smooth_sigma": "Smoothing strength applied to the NNLS recovered distribution.",
     "nnls_max_rg": "Largest Rg value included in the NNLS basis set.",
@@ -67,8 +67,14 @@ PARAM_HELP = {
     "tenor_calibration_p_min": "Smallest p value included in the Tenor calibration grid.",
     "tenor_calibration_p_max": "Largest p value included in the Tenor calibration grid.",
     "tenor_calibration_p_count": "Number of calibration p values simulated by Tenor-SAXS.",
-    "tenor_use_cubic_both": "Enable the cubic terms in the Tenor G(Q) and M(Q) polynomial fits, matching the richer MATLAB-style extraction.",
+    "tenor_use_cubic_both": "Enable cubic terms in the Tenor G(Q) and M(Q) polynomial fits. The MATLAB working3_26 example keeps these off, so that is now the default.",
 }
+
+
+def _derive_analysis_q_max(detector_q_max, q_loaded=None, use_loaded_data=False):
+    if use_loaded_data and q_loaded is not None and len(q_loaded) > 0:
+        return float(np.max(q_loaded))
+    return float(detector_q_max)
 
 
 def _current_reconstructed_fit(analysis_res, analysis_method):
@@ -250,6 +256,7 @@ def run():
 
     st.sidebar.title("Navigation")
     if st.sidebar.button("Return to Home"):
+        persist_app_settings(st.session_state)
         st.session_state.page = "home"
         st.rerun()
 
@@ -311,13 +318,15 @@ def run():
         if mode_key == "Sphere" and analysis_method == "Tomchuk" and p_val < 0.25:
             st.warning("Tomchuk analysis is intended for highly polydisperse spheres; results below p = 0.25 may be unreliable.")
 
+    persist_app_settings(st.session_state)
+
     with tab_settings:
         st.subheader("Instrument Parameters")
         c1, c2, c3, c4 = st.columns(4)
         pixels = int(c1.number_input("Detector Size (NxN)", min_value=64, step=64, key="pixels", help=PARAM_HELP["pixels"]))
         pixel_size_um = c2.number_input("Pixel Dimension (um x um)", min_value=1.0, step=1.0, key="pixel_size_um", help=PARAM_HELP["pixel_size_um"])
         sample_detector_distance_cm = c3.number_input("Sample-Detector Dist. (cm)", min_value=1.0, step=1.0, key="sample_detector_distance_cm", help=PARAM_HELP["sample_detector_distance_cm"])
-        wavelength_nm = c4.number_input("Wavelength (nm)", min_value=0.001, step=0.01, key="wavelength_nm", help=PARAM_HELP["wavelength_nm"])
+        wavelength_nm = c4.number_input("Wavelength (nm)", min_value=0.001, step=0.0001, format="%.4f", key="wavelength_nm", help=PARAM_HELP["wavelength_nm"])
         detector_q_max = get_detector_q_max(
             pixels=pixels,
             q_max=st.session_state.get("q_max", 1.0),
@@ -325,15 +334,20 @@ def run():
             sample_detector_distance_cm=sample_detector_distance_cm,
             wavelength_nm=wavelength_nm,
         )
-        if float(st.session_state.get("q_max", detector_q_max)) > detector_q_max:
-            st.session_state["q_max"] = float(detector_q_max)
+        derived_q_max = _derive_analysis_q_max(
+            detector_q_max=detector_q_max,
+            q_loaded=q_meas,
+            use_loaded_data=bool(use_experimental and q_meas is not None),
+        )
+        st.session_state["q_max"] = float(derived_q_max)
         st.caption(
             f"Instrument-derived detector q range: 0 to {detector_q_max:.3f} nm^-1 "
             f"(detector width {(pixels * pixel_size_um / 1.0e4):.3f} cm)"
         )
         c5, c6, c7, c8 = st.columns(4)
         q_min = c5.number_input("Min q", min_value=0.0, step=0.01, key="q_min", help=PARAM_HELP["q_min"])
-        q_max = c6.number_input("Analysis q max", min_value=0.01, max_value=max(float(detector_q_max), 0.01), step=0.1, key="q_max", help=PARAM_HELP["q_max"])
+        c6.number_input("Analysis q max", min_value=0.01, step=0.01, key="q_max", disabled=True, help=PARAM_HELP["q_max"])
+        q_max = float(st.session_state["q_max"])
         n_bins = int(c7.number_input("1D Bins", min_value=10, step=10, key="n_bins", help=PARAM_HELP["n_bins"]))
         binning_mode = c8.selectbox("Binning Mode", ["Logarithmic", "Linear"], key="binning_mode", help=PARAM_HELP["binning_mode"])
         c9, c10, c11 = st.columns(3)
@@ -346,7 +360,7 @@ def run():
         c12, c13, c14 = st.columns(3)
         c12.number_input("Radius Samples", min_value=50, step=50, key="radius_samples", help=PARAM_HELP["radius_samples"])
         c13.number_input("q Samples", min_value=50, step=50, key="q_samples", help=PARAM_HELP["q_samples"])
-        c14.number_input("Ensemble Members", min_value=3, step=1, key="ensemble_members", help=PARAM_HELP["ensemble_members"])
+        c14.number_input("Ensemble Members", min_value=3, step=1, key="ensemble_members", disabled=(st.session_state.get("ensemble_sampling", "Continuous") == "Continuous"), help=PARAM_HELP["ensemble_members"])
         c15, c16, c17, c18 = st.columns(4)
         model_options = ["Exact Sphere", "Guinier Curvature", "Exact Gaussian Chain", "Exact Shell", "Exact Thin Rod", "Exact Thin Disk"] if mode_key == "Sphere" else ["Exact Gaussian Chain", "Guinier Curvature"]
         current_model = st.session_state.get("form_factor_model", "Exact Sphere")
@@ -355,8 +369,9 @@ def run():
             st.session_state["form_factor_model"] = current_model
         c15.selectbox("Forward Model", model_options, index=model_options.index(current_model), key="form_factor_model", help=PARAM_HELP["form_factor_model"])
         c16.selectbox("Ensemble Sampling", ["Continuous", "Discrete"], key="ensemble_sampling", help=PARAM_HELP["ensemble_sampling"])
-        c17.number_input("phi2", step=0.001, key="phi2", help=PARAM_HELP["phi2"])
-        c18.number_input("phi3", step=0.001, key="phi3", help=PARAM_HELP["phi3"])
+        phi_disabled = st.session_state.get("form_factor_model", "Exact Sphere") != "Guinier Curvature"
+        c17.number_input("phi2", step=0.001, key="phi2", disabled=phi_disabled, help=PARAM_HELP["phi2"])
+        c18.number_input("phi3", step=0.001, key="phi3", disabled=phi_disabled, help=PARAM_HELP["phi3"])
         st.caption("Sample choice on the left sets the number-density distribution being simulated. For spheres, the exact-sphere forward model already applies the physical R^6 scattering weighting internally.")
         if analysis_method in {"Tomchuk", "Tenor"} and st.session_state.form_factor_model != "Exact Sphere":
             st.warning("Tomchuk and Tenor are calibrated primarily for sphere forward models; non-sphere forward models are best treated as simulation-only for now.")
@@ -407,8 +422,10 @@ def run():
         c31.number_input("TENOR p Max", min_value=0.01, step=0.01, key="tenor_calibration_p_max", help=PARAM_HELP["tenor_calibration_p_max"])
         c32.number_input("TENOR Calibration Points", min_value=4, step=1, key="tenor_calibration_p_count", help=PARAM_HELP["tenor_calibration_p_count"])
         st.checkbox("TENOR Use Cubic G/M", value=st.session_state.tenor_use_g3 and st.session_state.tenor_use_m3, key="tenor_use_cubic_both", help=PARAM_HELP["tenor_use_cubic_both"])
-        st.session_state["tenor_use_g3"] = bool(st.session_state.get("tenor_use_cubic_both", True))
-        st.session_state["tenor_use_m3"] = bool(st.session_state.get("tenor_use_cubic_both", True))
+        st.session_state["tenor_use_g3"] = bool(st.session_state.get("tenor_use_cubic_both", False))
+        st.session_state["tenor_use_m3"] = bool(st.session_state.get("tenor_use_cubic_both", False))
+
+    persist_app_settings(st.session_state)
 
     if analysis_method == "Tenor" and use_experimental:
         use_experimental = False
