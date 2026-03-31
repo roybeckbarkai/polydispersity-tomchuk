@@ -13,47 +13,49 @@ SETTINGS_FILE = Path(__file__).resolve().parent / "app_settings.json"
 
 DEFAULT_APP_SETTINGS = {
     "sim_mode": "Polydisperse Spheres",
-    "mean_rg": 2.0,
-    "p_val": 0.3,
-    "dist_type": "Gaussian",
-    "analysis_method": "NNLS",
+    "mean_rg": 4.0,
+    "p_val": 0.5477225575051661,
+    "dist_type": "Lognormal",
+    "analysis_method": "Tenor",
     "nnls_max_rg": 30.0,
     "nnls_basis_count": 150,
     "nnls_smooth_sigma": 1.0,
-    "pixels": 1000,
+    "pixels": 500,
+    "pixel_size_um": 70.0,
+    "sample_detector_distance_cm": 360.0,
+    "wavelength_nm": 0.1,
     "q_min": 0.0,
-    "q_max": 5.0,
-    "n_bins": 256,
+    "q_max": 0.6096435077216193,
+    "n_bins": 512,
     "binning_mode": "Logarithmic",
     "smearing_x": 3.0,
-    "smearing_y": 3.0,
+    "smearing_y": 15.0,
     "flux_pre": 1.0,
-    "flux_exp": 8,
+    "flux_exp": 5,
     "optimal_flux": False,
     "add_noise": True,
-    "radius_samples": 400,
-    "q_samples": 200,
+    "radius_samples": 50,
+    "q_samples": 1000,
     "form_factor_model": "Exact Sphere",
     "phi2": -1.0 / 63.0,
     "phi3": 0.0,
-    "weight_power": 6.0,
-    "ensemble_sampling": "Continuous",
-    "ensemble_members": 11,
-    "tenor_guinier_bins": 256,
-    "tenor_radial_bins": 18,
-    "tenor_qrg_limit": 0.85,
-    "tenor_psf_count": 5,
-    "tenor_psf_truncate": 4.0,
-    "tenor_psf_sigma_x_start": 1.2,
-    "tenor_psf_sigma_y_start": 0.6,
-    "tenor_psf_sigma_step": 0.4,
+    "ensemble_sampling": "Discrete",
+    "ensemble_members": 41,
+    "tenor_guinier_bins": 32,
+    "tenor_radial_bins": 20,
+    "tenor_qrg_limit": 1.0,
+    "tenor_psf_count": 10,
+    "tenor_psf_truncate": 1.0,
+    "tenor_psf_sigma_x_start": 2.0,
+    "tenor_psf_sigma_y_start": 2.0,
+    "tenor_psf_sigma_step": 0.5,
     "tenor_psf_secondary_ratio": 0.5,
     "tenor_use_g3": True,
     "tenor_use_m3": True,
     "tenor_calibration_p_min": 0.01,
-    "tenor_calibration_p_max": 0.6,
-    "tenor_calibration_p_count": 18,
-    "tomchuk_target_abs_error": 0.01,
+    "tenor_calibration_p_max": 1.0,
+    "tenor_calibration_p_count": 15,
+    "tomchuk_target_abs_error": 0.001,
 }
 
 
@@ -67,8 +69,11 @@ PARAMETER_DESCRIPTIONS = {
     "nnls_basis_count": "Number of basis functions used in the NNLS inversion grid.",
     "nnls_smooth_sigma": "Gaussian smoothing width applied to the recovered NNLS distribution.",
     "pixels": "Number of detector pixels along one image dimension for the simulated 2D pattern.",
+    "pixel_size_um": "Physical detector pixel dimension in micrometers. The total detector width is pixels multiplied by this value.",
+    "sample_detector_distance_cm": "Sample-to-detector distance used to convert detector position into q, in centimeters.",
+    "wavelength_nm": "Beam wavelength used to convert detector position into q, in nanometers.",
     "q_min": "Minimum q value included in the generated or analyzed 1D profile.",
-    "q_max": "Maximum q value included in the generated or analyzed 1D profile.",
+    "q_max": "Maximum q value kept in the 1D profile and downstream analysis. The effective value is clipped to the instrument-derived detector q limit.",
     "n_bins": "Number of q bins used when reducing the detector image to a 1D intensity profile.",
     "binning_mode": "Whether the 1D q bins are spaced linearly or logarithmically. Allowed values: 'Linear', 'Logarithmic'.",
     "smearing_x": "Gaussian detector smearing width along the horizontal detector axis, in pixels.",
@@ -82,7 +87,6 @@ PARAMETER_DESCRIPTIONS = {
     "form_factor_model": "Forward model used for the particle form factor. Allowed values: 'Exact Sphere', 'Guinier Curvature', 'Exact Gaussian Chain', 'Exact Shell', 'Exact Thin Rod', 'Exact Thin Disk'.",
     "phi2": "Second-order correction coefficient used by the Guinier-curvature forward model.",
     "phi3": "Third-order correction coefficient used by the Guinier-curvature forward model.",
-    "weight_power": "Additional radius-power weighting applied during ensemble averaging for selected forward models.",
     "ensemble_sampling": "Whether the ensemble is integrated continuously or approximated with a finite number of members. Allowed values: 'Continuous', 'Discrete'.",
     "ensemble_members": "Number of discrete ensemble members used when finite ensemble sampling is selected.",
     "tenor_guinier_bins": "Number of radial bins used when estimating the apparent Guinier radius for Tenor-SAXS.",
@@ -138,8 +142,23 @@ def load_persisted_settings():
                 parsed[key] = entry["value"]
             elif key in settings_block:
                 parsed[key] = settings_block[key]
+        if "pixel_size_um" not in parsed and "detector_side_cm" in settings_block:
+            detector_entry = settings_block.get("detector_side_cm")
+            detector_side_cm = detector_entry.get("value") if isinstance(detector_entry, dict) else detector_entry
+            pixels = parsed.get("pixels", DEFAULT_APP_SETTINGS["pixels"])
+            try:
+                parsed["pixel_size_um"] = float(detector_side_cm) * 1.0e4 / max(float(pixels), 1.0)
+            except Exception:
+                pass
         return parsed
-    return {key: payload[key] for key in DEFAULT_APP_SETTINGS if key in payload}
+    parsed = {key: payload[key] for key in DEFAULT_APP_SETTINGS if key in payload}
+    if "pixel_size_um" not in parsed and "detector_side_cm" in payload:
+        pixels = parsed.get("pixels", DEFAULT_APP_SETTINGS["pixels"])
+        try:
+            parsed["pixel_size_um"] = float(payload["detector_side_cm"]) * 1.0e4 / max(float(pixels), 1.0)
+        except Exception:
+            pass
+    return parsed
 
 
 def ensure_session_state_defaults(session_state):

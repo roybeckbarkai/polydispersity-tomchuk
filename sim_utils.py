@@ -180,11 +180,54 @@ def sample_size_distribution(size_grid, dist_type, mean_size, p_val, ensemble_sa
     return size_grid, pdf_vals
 
 
-def build_detector_q_grid(pixels, q_max):
-    q_axis = np.linspace(-q_max, q_max, pixels)
+def get_detector_q_max(
+    pixels,
+    q_max=None,
+    pixel_size_um=None,
+    detector_side_cm=None,
+    sample_detector_distance_cm=None,
+    wavelength_nm=None,
+):
+    pixels = max(int(float(pixels)), 2)
+    if (
+        (pixel_size_um is not None or detector_side_cm is not None)
+        and sample_detector_distance_cm is not None
+        and wavelength_nm is not None
+    ):
+        if pixel_size_um is None:
+            detector_side_cm = max(float(detector_side_cm), 1e-9)
+            pixel_pitch_cm = detector_side_cm / pixels
+        else:
+            pixel_pitch_cm = max(float(pixel_size_um), 1e-9) * 1e-4
+        sample_detector_distance_cm = max(float(sample_detector_distance_cm), 1e-9)
+        wavelength_nm = max(float(wavelength_nm), 1e-9)
+        return (4.0 * np.pi / wavelength_nm) * pixel_pitch_cm * (pixels - 1) / (2.0 * sample_detector_distance_cm)
+    if q_max is None:
+        raise ValueError("Either q_max or instrument geometry must be provided.")
+    return max(float(q_max), 1e-9)
+
+
+def build_detector_q_grid(
+    pixels,
+    q_max=None,
+    pixel_size_um=None,
+    detector_side_cm=None,
+    sample_detector_distance_cm=None,
+    wavelength_nm=None,
+):
+    pixels = max(int(float(pixels)), 2)
+    q_extent = get_detector_q_max(
+        pixels=pixels,
+        q_max=q_max,
+        pixel_size_um=pixel_size_um,
+        detector_side_cm=detector_side_cm,
+        sample_detector_distance_cm=sample_detector_distance_cm,
+        wavelength_nm=wavelength_nm,
+    )
+    q_axis = np.linspace(-q_extent, q_extent, pixels)
     qx, qy = np.meshgrid(q_axis, q_axis)
     q_r = np.sqrt(qx**2 + qy**2)
-    return q_axis, qx, qy, q_r
+    return q_axis, qx, qy, q_r, q_extent
 
 
 def radial_average_detector_image(i_2d, q_r, q_min, q_max, n_bins, binning_mode):
@@ -231,6 +274,14 @@ def run_simulation_core(params):
     pixels = int(float(params['pixels']))
     q_max = float(params['q_max'])
     q_min = float(params['q_min'])
+    pixel_size_um = float(
+        params.get(
+            'pixel_size_um',
+            float(params.get('detector_side_cm', 7.0)) * 1.0e4 / max(pixels, 1),
+        )
+    )
+    sample_detector_distance_cm = float(params.get('sample_detector_distance_cm', 150.0))
+    wavelength_nm = float(params.get('wavelength_nm', 0.15))
     n_bins = int(float(params['n_bins']))
     smearing = float(params.get('smearing', 0.0))
     smearing_x = float(params.get('smearing_x', smearing))
@@ -248,7 +299,9 @@ def run_simulation_core(params):
     weight_power = params.get('weight_power')
 
     kernel_func, size_kind, default_weight_power = get_form_factor_kernel(form_factor_model, phi2=phi2, phi3=phi3)
-    if weight_power is None:
+    if form_factor_model == "Exact Sphere":
+        weight_power = 0.0
+    elif weight_power is None:
         weight_power = default_weight_power
     weight_power = float(weight_power)
 
@@ -266,7 +319,15 @@ def run_simulation_core(params):
         ensemble_members=ensemble_members,
     )
 
-    q_1d = np.logspace(np.log10(1e-3), np.log10(q_max * 1.5), q_steps)
+    detector_q_max = get_detector_q_max(
+        pixels=pixels,
+        q_max=q_max,
+        pixel_size_um=pixel_size_um,
+        sample_detector_distance_cm=sample_detector_distance_cm,
+        wavelength_nm=wavelength_nm,
+    )
+    q_profile_max = min(q_max, detector_q_max)
+    q_1d = np.logspace(np.log10(1e-3), np.log10(detector_q_max * 1.5), q_steps)
 
     if str(ensemble_sampling).lower().startswith("disc"):
         i_matrix = kernel_func(q_1d, r_vals)
@@ -279,7 +340,13 @@ def run_simulation_core(params):
             i_matrix = i_matrix * (r_vals[np.newaxis, :] ** weight_power)
         i_1d_ideal = trapezoid(i_matrix * pdf_vals, r_vals, axis=1)
 
-    _, _, _, qv_r = build_detector_q_grid(pixels, q_max)
+    _, _, _, qv_r, _ = build_detector_q_grid(
+        pixels=pixels,
+        q_max=q_max,
+        pixel_size_um=pixel_size_um,
+        sample_detector_distance_cm=sample_detector_distance_cm,
+        wavelength_nm=wavelength_nm,
+    )
 
     i_2d_ideal = np.interp(qv_r.ravel(), q_1d, i_1d_ideal, left=i_1d_ideal[0], right=0)
     i_2d_ideal = i_2d_ideal.reshape(pixels, pixels)
@@ -309,7 +376,7 @@ def run_simulation_core(params):
         i_2d=i_2d_final,
         q_r=qv_r,
         q_min=q_min,
-        q_max=q_max,
+        q_max=q_profile_max,
         n_bins=n_bins,
         binning_mode=binning_mode,
     )

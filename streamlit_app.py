@@ -26,19 +26,14 @@ if st.session_state.page == 'home':
     with col1:
         st.info("**Single Run & Interactive Analysis**")
         st.markdown("Simulate one dataset, adjust parameters in real-time, and visualize 1D/2D results interactively.")
-        # Fixed: replaced use_container_width with width='stretch' per user warning/request (Streamlit updates)
-        # Note: If running on older Streamlit, this might warn "unexpected keyword". 
-        # But user specifically asked to fix the deprecation warning.
-        # However, use_container_width=True is the current standard API for buttons in 1.30+. 
-        # The user's specific error suggests 'width="stretch"'.
-        if st.button("Start Single Mode", use_container_width=True):
+        if st.button("Start Single Mode", width="stretch"):
             st.session_state.page = 'single'
             st.rerun()
             
     with col2:
         st.success("**Batch Processing**")
         st.markdown("Run multiple simulations automatically by defining parameter sweeps in a table.")
-        if st.button("Start Batch Mode", use_container_width=True):
+        if st.button("Start Batch Mode", width="stretch"):
             st.session_state.page = 'batch'
             st.rerun()
 

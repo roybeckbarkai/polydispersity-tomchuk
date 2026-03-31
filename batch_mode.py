@@ -21,6 +21,7 @@ from analysis_utils import (
     run_simulation_analysis_case,
 )
 from app_settings import DEFAULT_APP_SETTINGS
+from sim_utils import get_detector_q_max
 
 
 MODE_MAP = {"S": "Sphere", "P": "IDP"}
@@ -68,6 +69,13 @@ def _default_row(settings_like=None):
     settings_like = DEFAULT_APP_SETTINGS if settings_like is None else settings_like
     sim_mode = settings_like.get("sim_mode", "Polydisperse Spheres")
     mode_value = "Sphere" if "Sphere" in sim_mode else "IDP"
+    detector_q_max = get_detector_q_max(
+        pixels=settings_like["pixels"],
+        q_max=settings_like["q_max"],
+        pixel_size_um=settings_like["pixel_size_um"],
+        sample_detector_distance_cm=settings_like["sample_detector_distance_cm"],
+        wavelength_nm=settings_like["wavelength_nm"],
+    )
     return {
         "mode (S/P)": REV_MODE_MAP.get(mode_value, "S"),
         "dist (G/L/S/B/T/U)": REV_DIST_MAP.get(settings_like["dist_type"], "G"),
@@ -75,8 +83,11 @@ def _default_row(settings_like=None):
         "mean_rg": str(settings_like["mean_rg"]),
         "p_val": str(settings_like["p_val"]),
         "pixels": str(settings_like["pixels"]),
+        "pixel_size_um": str(settings_like["pixel_size_um"]),
+        "sample_detector_distance_cm": str(settings_like["sample_detector_distance_cm"]),
+        "wavelength_nm": str(settings_like["wavelength_nm"]),
         "q_min": str(settings_like["q_min"]),
-        "q_max": str(settings_like["q_max"]),
+        "q_max": str(min(float(settings_like["q_max"]), float(detector_q_max))),
         "n_bins": str(settings_like["n_bins"]),
         "binning (Log/Lin)": "Log",
         "smearing_x": str(settings_like["smearing_x"]),
@@ -88,7 +99,6 @@ def _default_row(settings_like=None):
         "form_factor_model": str(settings_like["form_factor_model"]),
         "phi2": str(settings_like["phi2"]),
         "phi3": str(settings_like["phi3"]),
-        "weight_power": str(settings_like["weight_power"]),
         "ensemble_sampling": str(settings_like["ensemble_sampling"]),
         "ensemble_members": str(settings_like["ensemble_members"]),
         "nnls_max_rg": str(settings_like["nnls_max_rg"]),
@@ -169,6 +179,14 @@ def run():
                             "mean_rg": float(row_dict["mean_rg"]),
                             "p_val": float(row_dict["p_val"]),
                             "pixels": int(float(row_dict["pixels"])),
+                            "pixel_size_um": float(
+                                row_dict.get(
+                                    "pixel_size_um",
+                                    float(row_dict.get("detector_side_cm", 7.0)) * 1.0e4 / max(float(row_dict["pixels"]), 1.0),
+                                )
+                            ),
+                            "sample_detector_distance_cm": float(row_dict.get("sample_detector_distance_cm", DEFAULT_APP_SETTINGS["sample_detector_distance_cm"])),
+                            "wavelength_nm": float(row_dict.get("wavelength_nm", DEFAULT_APP_SETTINGS["wavelength_nm"])),
                             "q_min": float(row_dict["q_min"]),
                             "q_max": float(row_dict["q_max"]),
                             "n_bins": int(float(row_dict["n_bins"])),
@@ -183,7 +201,6 @@ def run():
                             "form_factor_model": row_dict["form_factor_model"],
                             "phi2": float(row_dict["phi2"]),
                             "phi3": float(row_dict["phi3"]),
-                            "weight_power": float(row_dict["weight_power"]),
                             "ensemble_sampling": row_dict["ensemble_sampling"],
                             "ensemble_members": int(float(row_dict["ensemble_members"])),
                             "nnls_max_rg": float(row_dict["nnls_max_rg"]),
@@ -240,7 +257,7 @@ def run():
                         title=f"Relative Error in Recovered Size vs {x_axis}",
                     )
                     fig_size.add_hline(y=0, line_dash="dash", line_color="gray")
-                    st.plotly_chart(fig_size, use_container_width=True)
+                    st.plotly_chart(fig_size, width="stretch")
                 with r2:
                     fig_p = px.scatter(
                         res_df,
@@ -251,7 +268,7 @@ def run():
                         title=f"Relative Error in p vs {x_axis}",
                     )
                     fig_p.add_hline(y=0, line_dash="dash", line_color="gray")
-                    st.plotly_chart(fig_p, use_container_width=True)
+                    st.plotly_chart(fig_p, width="stretch")
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             st.download_button("Download Batch Results (ZIP)", zip_buffer.getvalue(), f"saxs_batch_{timestamp}.zip", "application/zip")

@@ -71,7 +71,7 @@ def build_default_psf_pairs(
 def apparent_rg_from_2d(i_2d, q_max, initial_rg_guess=4.0, n_bins=256):
     """Estimate the apparent Guinier radius from the raw 2D image."""
     pixels = np.asarray(i_2d).shape[0]
-    _, _, _, q_r = build_detector_q_grid(pixels, q_max)
+    _, _, _, q_r, _ = build_detector_q_grid(pixels, q_max=q_max)
     q_1d, i_1d = radial_average_detector_image(
         i_2d=i_2d,
         q_r=q_r,
@@ -299,7 +299,7 @@ def extract_pair_observables(
 ):
     pixels = i_2d.shape[0]
     dq = (2.0 * q_max) / max(pixels - 1, 1)
-    _, qx, qy, q_r = build_detector_q_grid(pixels, q_max)
+    _, qx, qy, q_r, _ = build_detector_q_grid(pixels, q_max=q_max)
     base_weights = np.maximum(i_2d, np.nanmax(i_2d) * 1e-12 if np.isfinite(i_2d).any() else 1e-12)
 
     img1 = apply_anisotropic_gaussian(i_2d, pair.sigma_x_1, pair.sigma_y_1)

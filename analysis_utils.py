@@ -9,7 +9,15 @@ from scipy.integrate import trapezoid
 from scipy.ndimage import gaussian_filter
 from scipy.special import erf, gammaln
 import pandas as pd
-from sim_utils import nCr, double_factorial, sphere_form_factor, debye_form_factor, get_distribution, run_simulation_core
+from sim_utils import (
+    nCr,
+    double_factorial,
+    sphere_form_factor,
+    debye_form_factor,
+    get_detector_q_max,
+    get_distribution,
+    run_simulation_core,
+)
 from app_settings import build_tenor_p_grid
 
 # Tomchuk's analytic Q and lc expressions [equations (8a) and (8b)]
@@ -596,7 +604,18 @@ def perform_saxs_analysis(q_exp, i_exp, dist_type, initial_rg_guess, mode, metho
             )
             tenor = analyze_tenor_saxs_2d(
                 i_2d=i_2d,
-                q_max=float(analysis_settings.get('q_max_for_tenor', q_exp[-1] if len(q_exp) > 0 else 1.0)),
+                q_max=float(
+                    analysis_settings.get(
+                        'q_max_for_tenor',
+                        get_detector_q_max(
+                            pixels=i_2d.shape[0],
+                            q_max=q_exp[-1] if len(q_exp) > 0 else 1.0,
+                            pixel_size_um=analysis_settings.get('pixel_size_um'),
+                            sample_detector_distance_cm=analysis_settings.get('sample_detector_distance_cm'),
+                            wavelength_nm=analysis_settings.get('wavelength_nm'),
+                        ),
+                    )
+                ),
                 dist_type=dist_type,
                 initial_rg_guess=initial_rg_guess,
                 psf_pairs=psf_pairs,
