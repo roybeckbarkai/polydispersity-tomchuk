@@ -8,7 +8,7 @@
     },
     "analysis_method": {
       "_comment": "Default analysis method used to recover size and polydispersity from the simulated data. Allowed values: 'NNLS', 'Tomchuk', 'Tenor'.",
-      "value": "Tenor"
+      "value": "Tomchuk"
     },
     "binning_mode": {
       "_comment": "Whether the 1D q bins are spaced linearly or logarithmically. Allowed values: 'Linear', 'Logarithmic'.",
@@ -16,7 +16,7 @@
     },
     "dist_type": {
       "_comment": "Probability distribution family used to generate the ensemble. Allowed values: 'Gaussian', 'Lognormal', 'Schulz', 'Boltzmann', 'Triangular', 'Uniform'.",
-      "value": "Boltzmann"
+      "value": "Gaussian"
     },
     "ensemble_members": {
       "_comment": "Number of representative sizes kept when Ensemble Sampling is set to Discrete. This value is ignored in Continuous mode, where the simulator integrates across the full radius_samples grid instead of selecting a finite member list.",
@@ -44,7 +44,7 @@
     },
     "mean_rg": {
       "_comment": "Mean radius of gyration of the simulated ensemble, in the app's working length units.",
-      "value": 3.950443013131565
+      "value": 4.337741347752306
     },
     "n_bins": {
       "_comment": "Number of q bins used when reducing the detector image to a 1D intensity profile.",
@@ -148,7 +148,7 @@
     },
     "tenor_psf_sigma_x_start": {
       "_comment": "Starting horizontal PSF sigma for the Tenor-SAXS PSF scan, in pixels.",
-      "value": 1.2
+      "value": 0.5
     },
     "tenor_psf_sigma_y_start": {
       "_comment": "Starting vertical PSF sigma for the Tenor-SAXS PSF scan, in pixels.",
@@ -156,19 +156,19 @@
     },
     "tenor_psf_truncate": {
       "_comment": "Gaussian kernel truncation radius, in sigma units, for digitally applied Tenor PSFs.",
-      "value": 4.0
+      "value": 10.0
     },
     "tenor_qrg_limit": {
       "_comment": "Upper qRg cutoff used when selecting the apparent Guinier fitting region for Tenor-SAXS.",
-      "value": 0.85
+      "value": 1.0
     },
     "tenor_radial_bins": {
       "_comment": "Number of radial sectors used in the Tenor-SAXS observable extraction workflow.",
-      "value": 20
+      "value": 10
     },
     "tenor_reconstruction_trials": {
       "_comment": "Number of candidate TENOR quartets that are carried into the reconstruction-validation stage. The code ranks quartets by physical plausibility and fit quality, then re-simulates these candidates and keeps the one whose reconstructed 2D data best matches the raw detector image.",
-      "value": 5
+      "value": 3
     },
     "tenor_use_cubic_both": {
       "_comment": "Persisted Streamlit widget value.",
