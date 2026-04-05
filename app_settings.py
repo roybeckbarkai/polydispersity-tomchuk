@@ -19,6 +19,11 @@ EXCLUDED_SESSION_KEYS = {
     "uploaded_batch",
 }
 
+TRANSIENT_WIDGET_KEYS = {
+    "run_q_samples_sensitivity",
+    "eval_tomchuk_grid",
+}
+
 
 DEFAULT_APP_SETTINGS = {
     "sim_mode": "Polydisperse Spheres",
@@ -144,7 +149,7 @@ def _iter_persisted_keys(settings_map):
     for key in settings_map.keys():
         if key in DEFAULT_APP_SETTINGS:
             continue
-        if key in EXCLUDED_SESSION_KEYS or str(key).startswith("_"):
+        if key in EXCLUDED_SESSION_KEYS or key in TRANSIENT_WIDGET_KEYS or str(key).startswith("_"):
             continue
         value = settings_map.get(key)
         if _is_persistable_value(value):
@@ -209,10 +214,13 @@ def load_persisted_settings():
 
 def hydrate_session_state_from_disk(session_state):
     persisted = load_persisted_settings()
+    for transient_key in TRANSIENT_WIDGET_KEYS:
+        persisted.pop(transient_key, None)
+        session_state.pop(transient_key, None)
     for key, value in DEFAULT_APP_SETTINGS.items():
         session_state[key] = persisted.get(key, value)
     for key, value in persisted.items():
-        if key not in EXCLUDED_SESSION_KEYS and not str(key).startswith("_"):
+        if key not in EXCLUDED_SESSION_KEYS and key not in TRANSIENT_WIDGET_KEYS and not str(key).startswith("_"):
             session_state[key] = value
     session_state["_settings_initialized_from_disk"] = True
 
@@ -223,11 +231,14 @@ def ensure_session_state_defaults(session_state):
         return
 
     persisted = load_persisted_settings()
+    for transient_key in TRANSIENT_WIDGET_KEYS:
+        persisted.pop(transient_key, None)
+        session_state.pop(transient_key, None)
     for key, value in DEFAULT_APP_SETTINGS.items():
         if key not in session_state:
             session_state[key] = persisted.get(key, value)
     for key, value in persisted.items():
-        if key not in session_state and key not in EXCLUDED_SESSION_KEYS and not str(key).startswith("_"):
+        if key not in session_state and key not in EXCLUDED_SESSION_KEYS and key not in TRANSIENT_WIDGET_KEYS and not str(key).startswith("_"):
             session_state[key] = value
 
 

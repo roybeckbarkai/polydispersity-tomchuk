@@ -26,10 +26,6 @@
       "_comment": "Whether the ensemble is integrated continuously or approximated with a finite number of members. Allowed values: 'Continuous', 'Discrete'.",
       "value": "Continuous"
     },
-    "eval_tomchuk_grid": {
-      "_comment": "Persisted Streamlit widget value.",
-      "value": false
-    },
     "flux_exp": {
       "_comment": "Base-10 exponent used in scientific notation for the central-pixel flux target.",
       "value": 4
@@ -101,10 +97,6 @@
     "radius_samples": {
       "_comment": "Number of radius or Rg support points used to build the size grid before simulation. This matters mainly for Continuous ensemble sampling, where the distribution is integrated across the full grid. In Discrete sampling, this still defines the candidate grid, but the simulator keeps only ensemble_members representative points.",
       "value": 2000
-    },
-    "run_q_samples_sensitivity": {
-      "_comment": "Persisted Streamlit widget value.",
-      "value": false
     },
     "sample_detector_distance_cm": {
       "_comment": "Sample-to-detector distance used to convert detector position into q, in centimeters.",
