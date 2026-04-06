@@ -1,8 +1,0 @@
-Study directory: studies/tomchuk_benchmark_20260329
-Summary CSV: studies/tomchuk_benchmark_20260329/tables/benchmark_summary.csv
-Aggregate CSV: studies/tomchuk_benchmark_20260329/tables/aggregate_by_condition.csv
-LaTeX appendix: studies/tomchuk_benchmark_20260329/reports/tomchuk_benchmark_appendix.tex
-PDF compiled: True
-
-Raw detector TIFF directory: /Users/roybeck/Library/CloudStorage/Dropbox/python code copy/tomchuk study files/tomchuk_benchmark_20260329/detector_tiff
-Raw 1D CSV directory: /Users/roybeck/Library/CloudStorage/Dropbox/python code copy/tomchuk study files/tomchuk_benchmark_20260329/profiles_csv
