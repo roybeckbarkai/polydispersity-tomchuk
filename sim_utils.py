@@ -85,6 +85,108 @@ def get_distribution(dist_type, r, mean_r, p):
     
     return np.zeros_like(r)
 
+
+def _distribution_pdf_on_grid(dist_type, grid, mean_size, p_val):
+    grid = np.asarray(grid, dtype=float)
+    pdf = np.asarray(get_distribution(dist_type, grid, mean_size, p_val), dtype=float)
+    pdf[~np.isfinite(pdf)] = 0.0
+    pdf = np.clip(pdf, 0.0, None)
+    return pdf
+
+
+def _build_discrete_distribution_from_pdf(
+    size_grid,
+    pdf_grid,
+    ensemble_members,
+    threshold=0.999,
+    xmin=None,
+    weight_power=0.0,
+):
+    size_grid = np.asarray(size_grid, dtype=float)
+    pdf_grid = np.asarray(pdf_grid, dtype=float)
+    if xmin is None:
+        xmin = float(size_grid[0]) if len(size_grid) else 0.0
+    ensemble_members = max(int(ensemble_members), 3)
+
+    valid = np.isfinite(size_grid) & np.isfinite(pdf_grid) & (size_grid >= xmin) & (pdf_grid >= 0)
+    size_grid = size_grid[valid]
+    pdf_grid = pdf_grid[valid]
+    if size_grid.size < 4 or np.sum(pdf_grid) <= 0:
+        return size_grid, pdf_grid
+
+    area = trapezoid(pdf_grid, size_grid)
+    if area <= 0:
+        return size_grid, pdf_grid
+    pdf_grid = pdf_grid / area
+
+    weight_curve = pdf_grid * np.power(np.maximum(size_grid, xmin), float(weight_power))
+    weight_area = trapezoid(weight_curve, size_grid)
+    if weight_area <= 0:
+        weight_curve = pdf_grid.copy()
+        weight_area = trapezoid(weight_curve, size_grid)
+    if weight_area <= 0:
+        return size_grid, pdf_grid
+
+    cumulative_weight = np.zeros_like(size_grid)
+    cumulative_weight[1:] = np.cumsum(0.5 * (weight_curve[1:] + weight_curve[:-1]) * np.diff(size_grid))
+    cumulative_weight /= cumulative_weight[-1]
+    cumulative_weight = np.maximum.accumulate(cumulative_weight + np.linspace(0.0, 1e-12, len(cumulative_weight)))
+    cumulative_weight[-1] = 1.0
+
+    cumulative_number = np.zeros_like(size_grid)
+    cumulative_number[1:] = np.cumsum(0.5 * (pdf_grid[1:] + pdf_grid[:-1]) * np.diff(size_grid))
+    cumulative_number /= cumulative_number[-1]
+
+    first_moment_density = pdf_grid * size_grid
+    cumulative_first_moment = np.zeros_like(size_grid)
+    cumulative_first_moment[1:] = np.cumsum(
+        0.5 * (first_moment_density[1:] + first_moment_density[:-1]) * np.diff(size_grid)
+    )
+
+    threshold = float(np.clip(threshold, 1e-6, 1.0))
+    prob_edges = np.linspace(0.0, threshold, ensemble_members + 1)
+    radius_edges = np.interp(prob_edges, cumulative_weight, size_grid, left=size_grid[0], right=size_grid[-1])
+
+    members = []
+    weights = []
+    eps = max(np.finfo(float).eps, 1e-15)
+    for left_edge, right_edge in zip(radius_edges[:-1], radius_edges[1:]):
+        if not np.isfinite(left_edge) or not np.isfinite(right_edge):
+            continue
+        if right_edge <= left_edge:
+            continue
+        p_low = np.interp(left_edge, size_grid, cumulative_number, left=0.0, right=1.0)
+        p_high = np.interp(right_edge, size_grid, cumulative_number, left=0.0, right=1.0)
+        bin_weight = max(float(p_high - p_low), 0.0)
+        if bin_weight <= eps:
+            continue
+        m1_low = np.interp(left_edge, size_grid, cumulative_first_moment, left=0.0, right=cumulative_first_moment[-1])
+        m1_high = np.interp(right_edge, size_grid, cumulative_first_moment, left=0.0, right=cumulative_first_moment[-1])
+        center_mass = float((m1_high - m1_low) / bin_weight)
+        if not np.isfinite(center_mass):
+            continue
+        members.append(max(center_mass, xmin))
+        weights.append(bin_weight)
+
+    if len(members) < 2:
+        fallback_indices = np.linspace(0, len(size_grid) - 1, ensemble_members).astype(int)
+        members = size_grid[np.unique(fallback_indices)]
+        weights = np.interp(members, size_grid, pdf_grid, left=0.0, right=0.0)
+
+    members = np.asarray(members, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    positive = np.isfinite(members) & np.isfinite(weights) & (weights > 0)
+    members = members[positive]
+    weights = weights[positive]
+    if members.size == 0 or np.sum(weights) <= 0:
+        return size_grid, pdf_grid
+
+    order = np.argsort(members)
+    members = members[order]
+    weights = weights[order]
+    weights = weights / np.sum(weights)
+    return members, weights
+
 # --- Form Factors ---
 def sphere_form_factor(q, r):
     q_col = q[:, np.newaxis]
@@ -163,17 +265,23 @@ def get_form_factor_kernel(form_factor_model, phi2=0.0, phi3=0.0):
 
 def sample_size_distribution(size_grid, dist_type, mean_size, p_val, ensemble_sampling="Continuous", ensemble_members=11):
     if str(ensemble_sampling).lower().startswith("disc"):
-        ensemble_members = max(int(ensemble_members), 3)
-        indices = np.linspace(0, len(size_grid) - 1, ensemble_members).astype(int)
-        sampled_sizes = np.unique(size_grid[indices])
-        pdf_vals = get_distribution(dist_type, sampled_sizes, mean_size, p_val)
-        weights = np.asarray(pdf_vals, dtype=float)
-        weight_sum = np.sum(weights)
-        if weight_sum > 0:
-            weights = weights / weight_sum
-        return sampled_sizes, weights
+        sigma = max(float(p_val) * float(mean_size), 1e-12)
+        fine_min = max(0.0, float(np.min(size_grid)) if len(size_grid) else 0.0)
+        fine_max = max(float(mean_size) + 20.0 * sigma, float(np.max(size_grid)) if len(size_grid) else float(mean_size))
+        fine_grid = np.linspace(fine_min, fine_max, max(len(size_grid), 10000))
+        if dist_type == "Lognormal":
+            fine_grid[0] = max(fine_grid[0], 1e-9)
+        pdf_vals = _distribution_pdf_on_grid(dist_type, fine_grid, mean_size, p_val)
+        return _build_discrete_distribution_from_pdf(
+            size_grid=fine_grid,
+            pdf_grid=pdf_vals,
+            ensemble_members=ensemble_members,
+            threshold=0.999,
+            xmin=fine_min,
+            weight_power=0.0,
+        )
 
-    pdf_vals = get_distribution(dist_type, size_grid, mean_size, p_val)
+    pdf_vals = _distribution_pdf_on_grid(dist_type, size_grid, mean_size, p_val)
     area = trapezoid(pdf_vals, size_grid)
     if area > 0:
         pdf_vals = pdf_vals / area

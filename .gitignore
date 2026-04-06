@@ -1,8 +1,70 @@
 __pycache__/
 *.py[cod]
+*$py.class
 
+.DS_Store
+.venv/
+.codex_pdfenv/
+
+# Local app state
+app_settings.json
+*.json
+
+# Generated study outputs and caches
 study_outputs/
 study_outputs_test/
 study_outputs_test2/
 study_outputs_test3/
 study_outputs_test4/
+studies/**/data/
+studies/**/figures/
+studies/**/logs/
+studies/**/tables/
+studies/**/reports/
+studies/**/comparison_section.*
+studies/**/progress_checkpoint.csv
+studies/**/summary_results.csv
+studies/**/study_metadata.json
+studies/**/rg_pilot_conclusion.json
+studies/**/*.csv
+studies/**/*.png
+studies/**/*.pdf
+studies/**/*.aux
+studies/**/*.bcf
+studies/**/*.bbl
+studies/**/*.blg
+studies/**/*.log
+studies/**/*.out
+studies/**/*.run.xml
+studies/bench*/
+studies/*console.log
+studies/tenor_adaptive_probe_summary_20260405.md
+
+# Local simulation caches and large data
+tomchuk_study_files_cache/
+*.npz
+*.npy
+*.zip
+
+# Papers, drafts, and generated docs kept locally
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.bib
+*.mlx
+*.tex
+comparison_section.tex
+comparison_section_draft.pdf
+
+# TeX build artifacts
+*.aux
+*.bcf
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
